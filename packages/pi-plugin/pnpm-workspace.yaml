@@ -1,0 +1,4 @@
+# pi's transitive dependencies (@google/genai, protobufjs) ship build scripts
+# this package never uses: only their type declarations matter here. Without
+# this setting, pnpm 10+ refuses to install (ERR_PNPM_IGNORED_BUILDS).
+strictDepBuilds: false

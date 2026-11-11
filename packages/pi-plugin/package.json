@@ -1,0 +1,35 @@
+{
+  "name": "pi-wake",
+  "version": "0.1.0",
+  "description": "Schedule a self wake-up: pi ends the turn and starts a new one at the chosen time",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "scheduler",
+    "timer",
+    "reminder"
+  ],
+  "pi": {
+    "extensions": [
+      "src/index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node test/extension.test.mjs"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "src"
+  ]
+}
