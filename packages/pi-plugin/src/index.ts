@@ -20,8 +20,13 @@
  * that is still pending is restored from the session file when the session is
  * reopened, and an overdue one fires immediately with a note saying how late it
  * is.
+ *
+ * The package also ships a usage skill (../skills/pi-wake) registered through
+ * resources_discover, so the convention travels with the extension instead of
+ * having to be written into AGENTS.md.
  */
 
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
@@ -29,6 +34,9 @@ import { Type, type Static } from "typebox";
 const ENTRY_TYPE = "wake_up";
 /** Message type of the reminder that starts the waking turn. */
 const MESSAGE_TYPE = "wake_up";
+
+/** Usage skill shipped with the package; registered whenever the extension loads. */
+const SKILL_DIRS = [fileURLToPath(new URL("../skills/pi-wake", import.meta.url))];
 
 /**
  * `setTimeout` overflows above this and fires immediately, so a longer wait is
@@ -260,6 +268,10 @@ export default function (pi: ExtensionAPI) {
 		const content = [{ type: "text" as const, text }];
 		return isError ? { content, details: full, isError: true as const } : { content, details: full };
 	}
+
+	/* ------------------------------------------------------------------ skill */
+
+	pi.on("resources_discover", async () => ({ skillPaths: SKILL_DIRS }));
 
 	/* ------------------------------------------------------------------- restore */
 

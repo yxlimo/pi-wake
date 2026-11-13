@@ -5,6 +5,7 @@
 // asserts on what pi was asked to do.
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 
 /** Collects everything the extension registers and emits. */
@@ -228,6 +229,20 @@ console.log("pi-wake");
 	const result = await run(tools.wake_up, { action: "schedule", after: "1h" });
 	assert.equal(result.details.id, "w8", "the counter continues from the restored ids");
 	console.log("  ok   重开后 id 继续递增，不会撞号");
+}
+
+// 13. The usage skill travels with the extension.
+{
+	const { handlers } = await boot();
+	const discover = handlers.resources_discover ?? [];
+	assert.equal(discover.length, 1, "resources_discover is registered");
+	const { skillPaths } = await discover[0]({ type: "resources_discover" }, {});
+	assert.equal(skillPaths.length, 1, "one skill directory is published");
+	assert.ok(skillPaths[0].endsWith("skills/pi-wake"), `skill dir: ${skillPaths[0]}`);
+	const skill = await readFile(`${skillPaths[0]}/SKILL.md`, "utf8");
+	assert.match(skill, /^---\nname: pi-wake\n/, "the skill has a name in its frontmatter");
+	assert.match(skill, /description:/, "the skill is discoverable by its description");
+	console.log("  ok   resources_discover 发布 skill 目录，SKILL.md 带 frontmatter");
 }
 
 console.log("\npi-wake 测试通过");

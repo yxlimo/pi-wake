@@ -58,7 +58,6 @@ The result of `schedule` names the resolved absolute time and the delay, so you
 can confirm the time was read the way you meant.
 
 ## What the waking turn receives
-
 ```text
 ⏰ 自动唤醒 · 2026-11-12 09:30:00 (Asia/Shanghai)
 
@@ -70,6 +69,20 @@ The message is injected as an extension message, marked as an automatic wake-up
 so the model does not mistake it for the user speaking. It starts a new turn when
 pi is idle; if a turn is still running at that moment, it is queued as a
 follow-up instead of interrupting.
+
+## Skill
+
+The package ships a usage skill at `packages/pi-plugin/skills/pi-wake/SKILL.md`, registered
+through `resources_discover` — so every session that loads the extension gets the
+conventions without anything added to `AGENTS.md`:
+
+- when a wake-up is the right tool and when it is not
+- the two time forms and how to translate what a user said into one of them
+- what belongs in `prompt` (the next action, plus any path or URL it needs)
+- the limits worth mentioning to a user: pi must be running, no repeats
+
+Loading the extension is the only requirement; `files` in `package.json` includes
+`skills`, so it travels with an npm install too.
 
 ## Limits
 
@@ -98,4 +111,5 @@ ship build scripts this package never uses, and pnpm 10+ otherwise refuses to
 install.
 
 The tests load the extension against a fake pi API and use real timers, so they
-cover arming, firing, cancelling, session restore and the long-delay chunking.
+cover arming, firing, cancelling, session restore, the long-delay chunking, and
+the published skill directory.
