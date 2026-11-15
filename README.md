@@ -41,7 +41,7 @@ subagentOnlyExtensions: ~/extensions/pi-wake/packages/pi-plugin/src/index.ts
 
 | action | fields | effect |
 | --- | --- | --- |
-| `schedule` | `at`, `after` or `every`, plus `prompt` | arm a wake-up, returns its `id`; `every` repeats until cancelled |
+| `schedule` | `at`, `after` or `every`, plus `prompt`; optional `when` gate | arm a wake-up, returns its `id`; `every` repeats until cancelled |
 | `list` | — | pending wake-ups, nearest first, with the time left |
 | `cancel` | `id`, or `all: true` | drop one or all pending wake-ups |
 
@@ -55,6 +55,14 @@ that interval until it is cancelled — `wake_up({ action: "schedule", every: "5
 prompt: "查 PR 的 review 与 CI，有要求就改" })`. Without `after` the first one
 fires one interval from now; with `after`, that is only the first delay. The
 minimum interval is `1s`.
+
+**Gate.** `when` runs a command when the time comes and only wakes you if it
+exits 0, so a recurring check can stay silent when there is nothing to report.
+`whenLang` picks `sh` (default) or `node`; `whenChanged: true` additionally
+requires the command's stdout to differ from the run that last fired, which is
+the usual way to ask for "wake me only when this actually changed"; `whenTimeout`
+(default 30s, max 300s) bounds it. The command reads `$PI_WAKE_ID` and
+`$PI_WAKE_LAST_STDOUT`, and its stdout is quoted in the reminder as evidence.
 
 **Prompt.** `prompt` is what the waking turn is told to do. Write the next
 action, not a restatement of the task — the waking turn still has the whole

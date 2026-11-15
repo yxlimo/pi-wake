@@ -5,6 +5,9 @@
 // asserts on what pi was asked to do.
 
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { readFile } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -320,6 +323,92 @@ console.log("pi-wake");
 	const { tools } = await boot();
 	assert.ok(tools.wake_up, "the main session still gets the tool");
 	console.log("  ok   后台子代理（PI_SUBAGENT_CHILD=1）不注册 wake_up，只有主会话能排计时器");
+}
+
+// 18. A `when` gate that does not hold keeps a repeating wake-up silent.
+{
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wake-gate-"));
+	const flag = path.join(dir, "flag");
+	const { tools, sent, notes } = await boot();
+	const result = await run(tools.wake_up, { action: "schedule", every: "1s", when: `test -f ${flag}`, prompt: "查 PR" });
+	assert.equal(result.isError, undefined, textOf(result));
+	assert.equal(result.details.gated, true, "the result says the wake-up is gated");
+
+	await sleep(1_200);
+	assert.equal(sent.length, 0, "a failing condition sends nothing");
+	assert.equal((await run(tools.wake_up, { action: "list" })).details.count, 1, "it stays pending");
+	assert.equal(notes.length, 0, "a quiet skip does not notify either");
+
+	fs.writeFileSync(flag, "ok");
+	await sleep(1_200);
+	assert.equal(sent.length, 1, "the wake-up fires once the condition holds");
+	try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+	console.log("  ok   when 条件不满足时重复唤醒保持沉默，条件成立才唤醒");
+}
+
+// 19. `whenChanged` fires only when the command's output actually moved.
+{
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wake-changed-"));
+	const state = path.join(dir, "state");
+	fs.writeFileSync(state, "alpha");
+	const { tools, sent } = await boot();
+	await run(tools.wake_up, { action: "schedule", every: "1s", when: `cat ${state}`, whenChanged: true, prompt: "查两个 PR" });
+
+	await sleep(1_200);
+	assert.equal(sent.length, 1, "the first run differs from the empty baseline");
+	assert.match(sent[0].message.content, /alpha/, "the reminder carries the condition output");
+
+	await sleep(1_200);
+	assert.equal(sent.length, 1, "an unchanged world stays silent");
+
+	fs.writeFileSync(state, "beta");
+	await sleep(1_200);
+	assert.equal(sent.length, 2, "a changed output wakes it again");
+	assert.match(sent[1].message.content, /beta/, "with the new output as evidence");
+	try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+	console.log("  ok   whenChanged 只在输出变化时唤醒，并把输出作为证据带给唤醒回合");
+}
+
+// 20. A one-shot wake-up whose gate never holds is dropped, and says so.
+{
+	const { tools, sent, notes } = await boot();
+	const result = await run(tools.wake_up, { action: "schedule", after: "100ms", when: "exit 1", prompt: "查 PR" });
+	assert.equal(result.isError, undefined, textOf(result));
+	await sleep(250);
+	assert.equal(sent.length, 0, "no turn starts");
+	assert.equal((await run(tools.wake_up, { action: "list" })).details.count, 0, "the wake-up is gone");
+	assert.ok(notes.some((note) => /已丢弃/.test(note.message)), "the user is told instead of waiting forever");
+	console.log("  ok   一次性唤醒条件不满足则丢弃并提示");
+}
+
+// 21. A condition that cannot run is reported once instead of blocking silently.
+{
+	const { tools, sent, notes } = await boot();
+	await run(tools.wake_up, { action: "schedule", after: "100ms", when: "sleep 5", whenTimeout: 1, prompt: "查 PR" });
+	await sleep(1_400);
+	assert.equal(sent.length, 0, "a timed-out condition does not wake anything");
+	assert.ok(notes.some((note) => /无法正常执行/.test(note.message)), "the broken condition is surfaced");
+	console.log("  ok   条件超时按不满足处理，并提示一次而不是静默永不唤醒");
+}
+
+// 22. `whenLang: "node"` runs the gate as a node program.
+{
+	const { tools, sent } = await boot();
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		after: "100ms",
+		whenLang: "node",
+		when: 'console.log("node-gate-ok")',
+		prompt: "查 PR",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	await sleep(400);
+	assert.equal(sent.length, 1, "a node gate that exits 0 fires the wake-up");
+	assert.match(sent[0].message.content, /node-gate-ok/u, "its stdout is the evidence");
+
+	const dependent = await run(tools.wake_up, { action: "schedule", after: "1h", whenLang: "node" });
+	assert.equal(dependent.isError, true, "whenLang without when is refused");
+	console.log("  ok   whenLang: node 用 node 跑条件，且 whenLang 不能脱离 when 使用");
 }
 
 console.log("\npi-wake 测试通过");

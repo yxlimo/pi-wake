@@ -45,6 +45,43 @@ the user anything.
 A time in the past is refused rather than fired immediately — if the user means
 "now", just continue working.
 
+## Only wake up when there is something to report
+
+A repeating wake-up that finds nothing to say should stay silent, not spend a
+turn on "no change". `when` gates the wake-up on a command:
+
+```text
+wake_up({
+  action: "schedule",
+  every: "5m",
+  when: "gh pr view 42 --repo owner/repo --json state,updatedAt",
+  whenChanged: true,
+  prompt: "PR 有动静了：看 review 意见，有要求修改就改",
+})
+```
+
+| field | meaning |
+| --- | --- |
+| `when` | Command run when the time comes. Exit 0 = wake, non-zero = stay silent. |
+| `whenLang` | `sh` (default, POSIX through `/bin/sh`) or `node` (`node -e`). |
+| `whenChanged` | Also require the command's stdout to differ from the run that last fired. This is what keeps an unchanged world quiet. |
+| `whenTimeout` | Seconds the command may take. Default 30, maximum 300. |
+
+The command gets `$PI_WAKE_ID` and `$PI_WAKE_LAST_STDOUT` (the output from the
+run that last fired, empty the first time), so it can do its own comparison
+instead of relying on `whenChanged`.
+
+When the wake-up does fire, the condition's stdout travels into the reminder as
+evidence, so the waking turn sees what changed without re-running the query.
+
+A skipped slot is silent: a repeating wake-up just re-arms. A **one-shot** gated
+wake-up has nothing left to wait for, so it is dropped and the user is told once.
+A condition that cannot run at all (timeout, missing interpreter) is reported
+once, because otherwise the wake-up would be silent forever.
+
+The command runs unsandboxed in the session's working directory, with the same
+power as the `bash` tool — a reminder is not a security boundary.
+
 ## What to put in `prompt`
 
 `prompt` is the instruction the waking turn gives itself. The waking turn keeps

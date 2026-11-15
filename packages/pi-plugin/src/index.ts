@@ -31,6 +31,7 @@
  * having to be written into AGENTS.md.
  */
 
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
@@ -49,6 +50,14 @@ const SKILL_DIRS = [fileURLToPath(new URL("../skills/pi-wake", import.meta.url))
  */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
+/** How long a `when` condition may run before it counts as unsatisfied. */
+const DEFAULT_CONDITION_TIMEOUT_MS = 30_000;
+const MAX_CONDITION_TIMEOUT_MS = 300_000;
+/** Output kept from a condition: enough to quote as evidence, small enough for a message. */
+const MAX_CONDITION_BYTES = 64 * 1024;
+/** How much of that output travels into the reminder. */
+const MAX_EVIDENCE_CHARS = 4_000;
+
 const wakeUpSchema = Type.Object(
 	{
 		action: Type.Union([Type.Literal("schedule"), Type.Literal("list"), Type.Literal("cancel")], {
@@ -65,6 +74,26 @@ const wakeUpSchema = Type.Object(
 				description:
 					"How long to wait, such as 90m, 2h, 1h30m, 45s. Mutually exclusive with `at`. With `every`, this is only the first delay.",
 			}),
+		),
+		when: Type.Optional(
+			Type.String({
+				description:
+					"Gate the wake-up on a command: it runs when the time comes, and the wake-up only starts a turn if it exits 0. Use it to stay silent when there is nothing to report.",
+			}),
+		),
+		whenLang: Type.Optional(
+			Type.Union([Type.Literal("sh"), Type.Literal("node")], {
+				description: "How to run `when`: a POSIX shell script through /bin/sh (default) or a node program. The exit status decides the gate.",
+			}),
+		),
+		whenChanged: Type.Optional(
+			Type.Boolean({
+				description:
+					"With `when`: also require that its stdout differ from the run that last fired this wake-up, so an unchanged world stays silent. The command can read the previous output from $PI_WAKE_LAST_STDOUT.",
+			}),
+		),
+		whenTimeout: Type.Optional(
+			Type.Number({ description: "Seconds `when` may run before it counts as unsatisfied. Default 30, maximum 300." }),
 		),
 		every: Type.Optional(
 			Type.String({
@@ -99,6 +128,8 @@ type WakeUpDetails = {
 	delayMs?: number;
 	/** Set when the wake-up repeats. */
 	intervalMs?: number;
+	/** Whether this wake-up only fires when its condition holds. */
+	gated?: boolean;
 };
 
 type Wake = {
@@ -111,6 +142,15 @@ type Wake = {
 	armedAt: number;
 	/** Repeat interval; absent for a one-shot wake-up. */
 	intervalMs?: number;
+	/** Condition that must exit 0 before the wake-up fires. */
+	when?: string;
+	whenLang?: "sh" | "node";
+	whenChanged?: boolean;
+	whenTimeoutMs?: number;
+	/** stdout of the run that last fired this wake-up, for `whenChanged`. */
+	lastStdout?: string;
+	/** Set once a broken condition has been reported, so it is reported once. */
+	reportedBroken?: boolean;
 	/** Pending timer, cleared when the wake-up fires or is cancelled. */
 	timer?: ReturnType<typeof setTimeout>;
 };
@@ -121,6 +161,12 @@ type WakeEntry = {
 	prompt?: string;
 	armedAt?: number;
 	intervalMs?: number;
+	when?: string;
+	whenLang?: "sh" | "node";
+	whenChanged?: boolean;
+	whenTimeoutMs?: number;
+	lastStdout?: string;
+	skippedAt?: number;
 	firedAt?: number;
 	cancelledAt?: number;
 };
@@ -224,7 +270,7 @@ export default function (pi: ExtensionAPI) {
 		if (remaining > MAX_TIMEOUT_MS) {
 			wake.timer = setTimeout(() => arm(wake), MAX_TIMEOUT_MS);
 		} else {
-			wake.timer = setTimeout(() => fire(wake.id), Math.max(0, remaining));
+			wake.timer = setTimeout(() => void fire(wake.id), Math.max(0, remaining));
 		}
 		// Never hold the process open: in a one-shot run pi should still exit when
 		// the turn is done instead of waiting for a wake-up that cannot be used.
@@ -236,10 +282,124 @@ export default function (pi: ExtensionAPI) {
 		pi.appendEntry<WakeEntry>(ENTRY_TYPE, entry);
 	}
 
+	/** Everything about a wake-up that the session file has to keep. */
+	function baseEntry(wake: Wake): WakeEntry {
+		return {
+			id: wake.id,
+			dueAt: wake.dueAt,
+			prompt: wake.prompt,
+			armedAt: wake.armedAt,
+			...(wake.intervalMs ? { intervalMs: wake.intervalMs } : {}),
+			...(wake.when ? { when: wake.when } : {}),
+			...(wake.whenLang ? { whenLang: wake.whenLang } : {}),
+			...(wake.whenChanged ? { whenChanged: true } : {}),
+			...(wake.whenTimeoutMs ? { whenTimeoutMs: wake.whenTimeoutMs } : {}),
+			...(wake.lastStdout !== undefined ? { lastStdout: wake.lastStdout } : {}),
+		};
+	}
+
+	type ConditionOutcome = { ok: boolean; stdout: string; stderr: string; broken?: string };
+
+	/**
+	 * Run the `when` gate.
+	 *
+	 * Exit status is the gate. A condition that cannot run at all (missing
+	 * interpreter, timeout, spawn failure) also counts as unsatisfied but is
+	 * reported, because otherwise the wake-up would be silent forever.
+	 */
+	function evaluateCondition(wake: Wake): Promise<ConditionOutcome> {
+		const env = {
+			...process.env,
+			PI_WAKE_ID: wake.id,
+			PI_WAKE_LAST_STDOUT: wake.lastStdout ?? "",
+		};
+		const [file, args] =
+			wake.whenLang === "node"
+				? [process.execPath, ["-e", wake.when ?? ""]]
+				: ["/bin/sh", ["-c", wake.when ?? ""]];
+		const timeout = Math.min(wake.whenTimeoutMs ?? DEFAULT_CONDITION_TIMEOUT_MS, MAX_CONDITION_TIMEOUT_MS);
+		return new Promise((resolve) => {
+			const stdout: Buffer[] = [];
+			const stderr: Buffer[] = [];
+			let settled = false;
+			const finish = (outcome: ConditionOutcome) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve(outcome);
+			};
+			const text = (chunks: Buffer[]) => Buffer.concat(chunks).toString("utf8").slice(0, MAX_CONDITION_BYTES);
+			let child: ReturnType<typeof spawn>;
+			try {
+				child = spawn(file, args, { cwd: process.cwd(), env, stdio: ["ignore", "pipe", "pipe"] });
+			} catch (error) {
+				resolve({ ok: false, stdout: "", stderr: "", broken: error instanceof Error ? error.message : String(error) });
+				return;
+			}
+			const timer = setTimeout(() => {
+				child.kill("SIGKILL");
+				finish({ ok: false, stdout: text(stdout), stderr: text(stderr), broken: `超过 ${Math.round(timeout / 1000)}s 没有返回` });
+			}, timeout);
+			timer.unref?.();
+			child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
+			child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+			child.once("error", (error) => finish({ ok: false, stdout: text(stdout), stderr: text(stderr), broken: error.message }));
+			child.once("close", (code, signal) => {
+				const broken = code === 0 ? undefined : signal ? `被信号 ${signal} 终止` : undefined;
+				finish({ ok: code === 0, stdout: text(stdout), stderr: text(stderr), ...(broken ? { broken } : {}) });
+			});
+		});
+	}
+
+	/**
+	 * Move a wake-up past a slot without starting a turn.
+	 *
+	 * A repeating wake-up stays silent and re-arms; a one-shot one has nothing
+	 * left to wait for, so it is dropped and the user is told rather than being
+	 * left with a reminder that will never arrive.
+	 */
+	function skip(wake: Wake, reason: string) {
+		const now = Date.now();
+		if (wake.intervalMs) {
+			const next = Math.max(wake.dueAt + wake.intervalMs, now + wake.intervalMs);
+			wake.dueAt = next;
+			arm(wake);
+			record({ ...baseEntry(wake), dueAt: next, skippedAt: now });
+			return;
+		}
+		wakes.delete(wake.id);
+		record({ ...baseEntry(wake), skippedAt: now });
+		sessionCtx?.ui?.notify(`pi-wake: ${wake.id} 的条件不满足（${reason}），一次性唤醒已丢弃。`, "info");
+	}
+
 	/** Start the waking turn; a repeating wake-up re-arms itself for its next slot. */
-	function fire(id: string) {
+	async function fire(id: string) {
 		const wake = wakes.get(id);
 		if (!wake) return;
+
+		let evidence = "";
+		if (wake.when) {
+			const outcome = await evaluateCondition(wake);
+			// The wake-up may have been cancelled while the condition ran.
+			if (wakes.get(id) !== wake) return;
+			if (outcome.broken && !wake.reportedBroken) {
+				wake.reportedBroken = true;
+				sessionCtx?.ui?.notify(`pi-wake: ${wake.id} 的 when 条件无法正常执行：${outcome.broken}`, "warning");
+			}
+			const changed = !wake.whenChanged || outcome.stdout !== (wake.lastStdout ?? "");
+			if (!outcome.ok || !changed) {
+				let reason = "输出没有变化";
+				if (!outcome.ok) {
+					const noise = outcome.stderr.trim().slice(0, 200);
+					reason = noise ? `退出码非 0：${noise}` : "退出码非 0";
+				}
+				skip(wake, reason);
+				return;
+			}
+			wake.lastStdout = outcome.stdout;
+			evidence = outcome.stdout.trim().slice(0, MAX_EVIDENCE_CHARS);
+		}
+
 		const firedAt = Date.now();
 		if (wake.intervalMs) {
 			// Fixed cadence, but never catch up: slots missed while pi was not
@@ -247,10 +407,10 @@ export default function (pi: ExtensionAPI) {
 			const next = Math.max(wake.dueAt + wake.intervalMs, firedAt + wake.intervalMs);
 			wake.dueAt = next;
 			arm(wake);
-			record({ id: wake.id, dueAt: next, prompt: wake.prompt, armedAt: wake.armedAt, intervalMs: wake.intervalMs });
+			record({ ...baseEntry(wake), dueAt: next });
 		} else {
 			wakes.delete(id);
-			record({ id: wake.id, dueAt: wake.dueAt, prompt: wake.prompt, armedAt: wake.armedAt, firedAt });
+			record({ ...baseEntry(wake), firedAt });
 		}
 
 		const late = firedAt - wake.dueAt;
@@ -267,6 +427,9 @@ export default function (pi: ExtensionAPI) {
 				? `你当时给自己的指令：${wake.prompt.trim()}`
 				: "你当时没有写下具体指令，按当前上下文继续。",
 		);
+		if (evidence) {
+			lines.push("", "唤醒时条件的输出：", "```", evidence, "```");
+		}
 		if (wake.intervalMs) {
 			lines.push(`（这是每 ${formatSpan(wake.intervalMs)} 重复的提醒，下次 ${formatLocal(wake.dueAt)}。不需要了就 cancel。）`);
 		}
@@ -285,7 +448,8 @@ export default function (pi: ExtensionAPI) {
 		const remaining = wake.dueAt - Date.now();
 		const prompt = wake.prompt.trim() ? ` — "${wake.prompt.trim()}"` : "";
 		const cadence = wake.intervalMs ? `，每 ${formatSpan(wake.intervalMs)} 重复` : "";
-		return `${wake.id}: ${formatLocal(wake.dueAt)}（还有 ${formatSpan(remaining)}${cadence}）${prompt}`;
+		const gate = wake.when ? "，条件满足才唤醒" : "";
+		return `${wake.id}: ${formatLocal(wake.dueAt)}（还有 ${formatSpan(remaining)}${cadence}${gate}）${prompt}`;
 	}
 
 	function pending(): Wake[] {
@@ -329,6 +493,11 @@ export default function (pi: ExtensionAPI) {
 				prompt: data.prompt ?? "",
 				armedAt: Number(data.armedAt) || dueAt,
 				...(Number(data.intervalMs) > 0 ? { intervalMs: Number(data.intervalMs) } : {}),
+				...(data.when ? { when: data.when } : {}),
+				...(data.whenLang === "node" ? { whenLang: "node" as const } : {}),
+				...(data.whenChanged ? { whenChanged: true } : {}),
+				...(Number(data.whenTimeoutMs) > 0 ? { whenTimeoutMs: Number(data.whenTimeoutMs) } : {}),
+				...(typeof data.lastStdout === "string" ? { lastStdout: data.lastStdout } : {}),
 			};
 			wakes.set(wake.id, wake);
 			arm(wake);
@@ -424,6 +593,11 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
+			const when = params.when?.trim();
+			if (!when && (params.whenLang || params.whenChanged !== undefined || params.whenTimeout !== undefined)) {
+				return reply("`whenLang`、`whenChanged`、`whenTimeout` 只跟 `when` 一起用，没有 `when` 时它们没有意义。", {}, true);
+			}
+
 			let firstDelayMs: number | undefined;
 			let intervalMs: number | undefined;
 			if (hasAfter) {
@@ -459,20 +633,28 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const id = `w${++counter}`;
-			const wake: Wake = { id, dueAt, prompt: params.prompt ?? "", armedAt: now, ...(intervalMs ? { intervalMs } : {}) };
+			const gate = when
+				? {
+						when,
+						...(params.whenLang === "node" ? { whenLang: "node" as const } : {}),
+						...(params.whenChanged ? { whenChanged: true } : {}),
+						...(params.whenTimeout ? { whenTimeoutMs: Math.min(Math.max(params.whenTimeout, 1), 300) * 1_000 } : {}),
+					}
+				: {};
+			const wake: Wake = { id, dueAt, prompt: params.prompt ?? "", armedAt: now, ...(intervalMs ? { intervalMs } : {}), ...gate };
 			wakes.set(id, wake);
 			arm(wake);
-			record({ id, dueAt, prompt: wake.prompt, armedAt: now, ...(intervalMs ? { intervalMs } : {}) });
+			record(baseEntry(wake));
 
 			const others = pending().filter((item) => item.id !== id);
 			const text = [
-				`已安排 ${id}：${formatLocal(dueAt)}，还有 ${formatSpan(dueAt - now)}${intervalMs ? `，之后每 ${formatSpan(intervalMs)} 重复` : ""}。`,
+				`已安排 ${id}：${formatLocal(dueAt)}，还有 ${formatSpan(dueAt - now)}${intervalMs ? `，之后每 ${formatSpan(intervalMs)} 重复` : ""}${when ? `，每次先跑 when 条件，退出码 0${params.whenChanged ? "且输出有变化" : ""}才唤醒` : ""}。`,
 				others.length ? `另有 ${others.length} 个待唤醒：${others.map((item) => item.id).join(", ")}。` : "",
 				"本轮可以结束了；到点后我会带着提醒重新开始一轮。",
 			]
 				.filter(Boolean)
 				.join("\n");
-			return reply(text, { scheduled: true, id, dueAt, delayMs: dueAt - now, ...(intervalMs ? { intervalMs } : {}) });
+			return reply(text, { scheduled: true, id, dueAt, delayMs: dueAt - now, ...(intervalMs ? { intervalMs } : {}), ...(when ? { gated: true } : {}) });
 		},
 	});
 
