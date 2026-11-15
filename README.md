@@ -41,7 +41,7 @@ subagentOnlyExtensions: ~/extensions/pi-wake/packages/pi-plugin/src/index.ts
 
 | action | fields | effect |
 | --- | --- | --- |
-| `schedule` | `at` or `after` (one of them), `prompt` | arm a wake-up, returns its `id` |
+| `schedule` | `at`, `after` or `every`, plus `prompt` | arm a wake-up, returns its `id`; `every` repeats until cancelled |
 | `list` | — | pending wake-ups, nearest first, with the time left |
 | `cancel` | `id`, or `all: true` | drop one or all pending wake-ups |
 
@@ -49,6 +49,12 @@ subagentOnlyExtensions: ~/extensions/pi-wake/packages/pi-plugin/src/index.ts
 offset wins; without one the local time zone is used. A bare date
 (`2026-11-12`) means local midnight. `after` is a duration with units: `90m`,
 `2h`, `1h30m`, `45s`, `3d`. Both forms end up as a delay from now.
+
+**Repeat.** `every` takes the same durations and makes the wake-up come back at
+that interval until it is cancelled — `wake_up({ action: "schedule", every: "5m",
+prompt: "查 PR 的 review 与 CI，有要求就改" })`. Without `after` the first one
+fires one interval from now; with `after`, that is only the first delay. The
+minimum interval is `1s`.
 
 **Prompt.** `prompt` is what the waking turn is told to do. Write the next
 action, not a restatement of the task — the waking turn still has the whole
@@ -77,9 +83,11 @@ through `resources_discover` — so every session that loads the extension gets 
 conventions without anything added to `AGENTS.md`:
 
 - when a wake-up is the right tool and when it is not
-- the two time forms and how to translate what a user said into one of them
+- the time forms (`at`, `after`, repeating `every`) and how to translate what a
+  user said into one of them
 - what belongs in `prompt` (the next action, plus any path or URL it needs)
-- the limits worth mentioning to a user: pi must be running, no repeats
+- the limits worth mentioning to a user: pi must be running, and a repeating
+  wake-up keeps going until it is cancelled
 
 Loading the extension is the only requirement; `files` in `package.json` includes
 `skills`, so it travels with an npm install too.
@@ -92,8 +100,14 @@ Loading the extension is the only requirement; `files` in `package.json` include
 - **Reopening a session restores pending wake-ups.** The schedule is stored in
   the session file, so `/resume` picks it up again. A wake-up that came due while
   pi was closed fires immediately on reopen, and its message says how late it is.
-- **No repeats.** A wake-up fires once. Schedule another one from the waking turn
-  if you want a second check.
+- **Repeating wake-ups keep the cadence and skip missed slots.** With `every` the
+  wake-up re-arms itself after each firing. If pi was closed across several
+  slots, it fires once and continues from the next slot instead of catching up.
+  Only `cancel` stops it.
+- **Subagents get no `wake_up`.** A background child runs with
+  `PI_SUBAGENT_CHILD=1` and loads ambient extensions, so a global install reaches
+  it too; the extension then registers nothing, because a wake scheduled inside a
+  child would start a turn in a run that is already ending.
 - **One process at a time.** Two pi sessions on the same session file would each
   arm their own timer; nothing coordinates them.
 

@@ -1,6 +1,6 @@
 ---
 name: pi-wake
-description: Use when work has to resume on its own at a later time — waiting for CI, a build, a deploy, a rate limit, or a user-requested reminder. Covers the wake_up tool (action schedule / list / cancel), the two time forms (absolute `at` in ISO 8601, relative `after` like 90m), what the waking turn receives, and the limits (pi must stay running, no repeats).
+description: Use when work has to resume on its own at a later time — waiting for CI, a build, a deploy, a rate limit, or a user-requested reminder. Covers the wake_up tool (action schedule / list / cancel), the time forms (absolute `at` in ISO 8601, relative `after` like 90m, repeating `every` like 5m), what the waking turn receives, and the limits (pi must stay running).
 ---
 
 # pi-wake: waking yourself up later
@@ -25,19 +25,22 @@ on something you could just check synchronously.
 wake_up({ action: "schedule", after: "90m", prompt: "继续跑 typecheck" })
 wake_up({ action: "schedule", at: "2026-11-12T09:30:00+08:00", prompt: "看 CI 跑完没" })
 wake_up({ action: "schedule", after: "8s", prompt: "读 /tmp/build.log 最后 50 行，失败就修" })
+wake_up({ action: "schedule", every: "5m", prompt: "查 PR 的 review 与 CI，有要求就改" })
 ```
 
-Give exactly one of `at` or `after`:
+Give `at`, `after`, or `every` — at most one of `at` and `after`:
 
 | form | value | notes |
 | --- | --- | --- |
 | `at` | `2026-11-12T09:30:00+08:00` | ISO 8601. An offset wins; without one, local time. A bare date means local midnight. |
 | `after` | `90m`, `2h`, `1h30m`, `45s`, `3d` | units required (`ms`, `s`, `m`, `h`, `d`) |
+| `every` | `5m`, `1h` | repeats at that interval until cancelled. Minimum `1s`. Cannot be combined with `at`; with `after`, `after` is only the first delay, and alone it starts one interval out. |
 
-Translate what the user said into one of these two forms instead of computing
-clock arithmetic: "明早九点" becomes `at`, "过一会儿" becomes `after`. The result
-reports the resolved absolute time and the remaining delay, so check those before
-telling the user anything.
+Translate what the user said into one of these forms instead of computing
+clock arithmetic: "明早九点" becomes `at`, "过一会儿" becomes `after`, "每五分钟
+看一眼" becomes `every`. The result reports the resolved absolute time, the
+remaining delay, and the interval when it repeats, so check those before telling
+the user anything.
 
 A time in the past is refused rather than fired immediately — if the user means
 "now", just continue working.
@@ -84,8 +87,13 @@ Humans can list the same thing with the `/wake` command.
 - **Reopening a session restores pending wake-ups**, because the schedule is in
   the session file. One that came due while pi was closed fires on reopen, and
   the message says how late it is.
-- **No repeats.** A wake-up fires once. For periodic checks, arm the next one
-  from the waking turn rather than expecting a recurring timer.
+- **Repeating wake-ups keep a fixed cadence and skip missed slots.** `every`
+  re-arms itself after each firing; if pi was closed across several slots, the
+  wake-up does not fire them back to back, it continues from the next slot. It
+  stays pending until `cancel`, so cancelling is the only way to stop it.
+- **Only the main session has this tool.** Background subagents load the
+  extension with `PI_SUBAGENT_CHILD=1` and get no `wake_up`; a subagent that
+  needs a later check reports it to the parent instead.
 - **Do not promise background work.** A scheduled wake-up is not a background
   job: tell the user the wake-up time, and say the work happens when pi is open
   at that time.

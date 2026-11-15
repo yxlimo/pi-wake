@@ -245,4 +245,81 @@ console.log("pi-wake");
 	console.log("  ok   resources_discover 发布 skill 目录，SKILL.md 带 frontmatter");
 }
 
+// 14. `every` repeats on its own cadence until it is cancelled.
+{
+	const { tools, sent } = await boot();
+	const result = await run(tools.wake_up, { action: "schedule", every: "1s", prompt: "查两个 PR 的状态" });
+	assert.equal(result.isError, undefined, textOf(result));
+	assert.equal(result.details.intervalMs, 1_000, "the interval is reported back");
+	assert.match(textOf(result), /重复/, "the result says it repeats");
+
+	await sleep(1_100);
+	assert.equal(sent.length, 1, "the first slot fires");
+	assert.match(sent[0].message.content, /重复/, "the reminder says it will come back");
+
+	await sleep(1_100);
+	assert.equal(sent.length, 2, "it fires again without being re-scheduled");
+
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.equal(list.details.count, 1, "a repeating wake-up stays pending after firing");
+
+	await run(tools.wake_up, { action: "cancel", all: true });
+	const fired = sent.length;
+	await sleep(1_200);
+	assert.equal(sent.length, fired, "cancelling stops the repetition");
+	assert.equal((await run(tools.wake_up, { action: "list" })).details.count, 0, "nothing is left pending");
+	console.log("  ok   every 按固定节奏重复，cancel 之后不再唤醒");
+}
+
+// 15. `every` cannot be combined with `at`, and alone it starts one interval out.
+{
+	const { tools } = await boot();
+	const conflict = await run(tools.wake_up, { action: "schedule", at: "2030-01-01T00:00:00", every: "5m" });
+	assert.equal(conflict.isError, true, "an absolute first time and an interval are refused together");
+
+	const alone = await run(tools.wake_up, { action: "schedule", every: "1h" });
+	assert.equal(alone.isError, undefined, textOf(alone));
+	assert.ok(alone.details.delayMs >= 3_599_000, "without after, the first firing is one interval away");
+	assert.equal(alone.details.intervalMs, 3_600_000);
+
+	const tooFast = await run(tools.wake_up, { action: "schedule", every: "10ms" });
+	assert.equal(tooFast.isError, true, "a sub-second interval is refused");
+	console.log("  ok   every 与 at 互斥，单独给 every 时首次延迟等于间隔，且拒绝亚秒间隔");
+}
+
+// 16. A restored repeating wake-up keeps its interval and re-arms instead of finishing.
+{
+	const entries = [{ type: "custom", customType: "wake_up", data: { id: "w9", dueAt: Date.now() + 80, intervalMs: 1_000 } }];
+	const { tools, sent, entries: recorded } = await boot({ entries });
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.match(textOf(list), /每 1s 重复/, "the pending list shows the cadence");
+
+	await sleep(120);
+	assert.equal(sent.length, 1, "the restored repeating wake-up fires");
+	const rearm = recorded.at(-1).data;
+	assert.equal(rearm.intervalMs, 1_000, "the re-arm keeps the interval");
+	assert.ok(rearm.dueAt > Date.now(), "the next slot is in the future");
+	assert.equal(rearm.firedAt, undefined, "a repeating wake-up is never marked finished");
+	assert.equal(rearm.cancelledAt, undefined);
+	console.log("  ok   重开会话后重复唤醒保留间隔并重新排期，不会被当成已结束");
+}
+
+// 17. A background subagent gets no wake_up tool: only the main session schedules.
+{
+	const previous = process.env.PI_SUBAGENT_CHILD;
+	process.env.PI_SUBAGENT_CHILD = "1";
+	try {
+		const { tools, commands, sent } = await boot();
+		assert.equal(tools.wake_up, undefined, "a child process does not register wake_up");
+		assert.equal(commands.wake, undefined, "a child process does not register /wake");
+		assert.equal(sent.length, 0);
+	} finally {
+		if (previous === undefined) delete process.env.PI_SUBAGENT_CHILD;
+		else process.env.PI_SUBAGENT_CHILD = previous;
+	}
+	const { tools } = await boot();
+	assert.ok(tools.wake_up, "the main session still gets the tool");
+	console.log("  ok   后台子代理（PI_SUBAGENT_CHILD=1）不注册 wake_up，只有主会话能排计时器");
+}
+
 console.log("\npi-wake 测试通过");

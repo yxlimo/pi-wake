@@ -8,13 +8,18 @@
  * Usage:
  *
  *   wake_up({ action: "schedule", after: "90m", prompt: "继续跑 typecheck" })
+ *   wake_up({ action: "schedule", every: "5m", prompt: "查一下 PR 状态" })
  *   wake_up({ action: "schedule", at: "2026-11-12T09:30:00+08:00" })
  *   wake_up({ action: "list" })
  *   wake_up({ action: "cancel", id: "w1" })
  *   wake_up({ action: "cancel", all: true })
  *
- * Both time forms end up as a delay measured from now, so `at` is only a
- * different way of saying "after"; everything below works on `dueAt`.
+ * Both one-shot time forms end up as a delay measured from now, so `at` is only
+ * a different way of saying "after"; everything below works on `dueAt`.
+ *
+ * `every` makes the wake-up repeat: it fires, then re-arms itself at a fixed
+ * cadence until it is cancelled. A repeating wake-up skips the slots it missed
+ * while pi was not running instead of firing them back to back.
  *
  * Wakes only fire while pi is running: the timer lives in this process. A wake
  * that is still pending is restored from the session file when the session is
@@ -58,7 +63,13 @@ const wakeUpSchema = Type.Object(
 		after: Type.Optional(
 			Type.String({
 				description:
-					"How long to wait, such as 90m, 2h, 1h30m, 45s. Mutually exclusive with `at`.",
+					"How long to wait, such as 90m, 2h, 1h30m, 45s. Mutually exclusive with `at`. With `every`, this is only the first delay.",
+			}),
+		),
+		every: Type.Optional(
+			Type.String({
+				description:
+					"Repeat instead of firing once: the interval between wake-ups, such as 5m or 1h. Without `after` the first one fires one interval from now. Cancelling stops it. Mutually exclusive with `at`.",
 			}),
 		),
 		prompt: Type.Optional(
@@ -86,6 +97,8 @@ type WakeUpDetails = {
 	id?: string;
 	dueAt?: number;
 	delayMs?: number;
+	/** Set when the wake-up repeats. */
+	intervalMs?: number;
 };
 
 type Wake = {
@@ -96,6 +109,8 @@ type Wake = {
 	prompt: string;
 	/** When the schedule was created, so the reminder can say how long it slept. */
 	armedAt: number;
+	/** Repeat interval; absent for a one-shot wake-up. */
+	intervalMs?: number;
 	/** Pending timer, cleared when the wake-up fires or is cancelled. */
 	timer?: ReturnType<typeof setTimeout>;
 };
@@ -105,6 +120,7 @@ type WakeEntry = {
 	dueAt: number;
 	prompt?: string;
 	armedAt?: number;
+	intervalMs?: number;
 	firedAt?: number;
 	cancelledAt?: number;
 };
@@ -220,14 +236,24 @@ export default function (pi: ExtensionAPI) {
 		pi.appendEntry<WakeEntry>(ENTRY_TYPE, entry);
 	}
 
-	/** Start the waking turn. */
+	/** Start the waking turn; a repeating wake-up re-arms itself for its next slot. */
 	function fire(id: string) {
 		const wake = wakes.get(id);
 		if (!wake) return;
-		wakes.delete(id);
-		record({ id: wake.id, dueAt: wake.dueAt, prompt: wake.prompt, armedAt: wake.armedAt, firedAt: Date.now() });
+		const firedAt = Date.now();
+		if (wake.intervalMs) {
+			// Fixed cadence, but never catch up: slots missed while pi was not
+			// running are skipped rather than fired back to back.
+			const next = Math.max(wake.dueAt + wake.intervalMs, firedAt + wake.intervalMs);
+			wake.dueAt = next;
+			arm(wake);
+			record({ id: wake.id, dueAt: next, prompt: wake.prompt, armedAt: wake.armedAt, intervalMs: wake.intervalMs });
+		} else {
+			wakes.delete(id);
+			record({ id: wake.id, dueAt: wake.dueAt, prompt: wake.prompt, armedAt: wake.armedAt, firedAt });
+		}
 
-		const late = Date.now() - wake.dueAt;
+		const late = firedAt - wake.dueAt;
 		const lines = [
 			`⏰ 自动唤醒 · ${formatLocal(wake.dueAt)}`,
 			"",
@@ -241,6 +267,9 @@ export default function (pi: ExtensionAPI) {
 				? `你当时给自己的指令：${wake.prompt.trim()}`
 				: "你当时没有写下具体指令，按当前上下文继续。",
 		);
+		if (wake.intervalMs) {
+			lines.push(`（这是每 ${formatSpan(wake.intervalMs)} 重复的提醒，下次 ${formatLocal(wake.dueAt)}。不需要了就 cancel。）`);
+		}
 
 		// `followUp` keeps a running turn intact; when idle it is ignored and
 		// `triggerTurn` starts a fresh one. One call covers both cases.
@@ -255,7 +284,8 @@ export default function (pi: ExtensionAPI) {
 	function describe(wake: Wake): string {
 		const remaining = wake.dueAt - Date.now();
 		const prompt = wake.prompt.trim() ? ` — "${wake.prompt.trim()}"` : "";
-		return `${wake.id}: ${formatLocal(wake.dueAt)}（还有 ${formatSpan(remaining)}）${prompt}`;
+		const cadence = wake.intervalMs ? `，每 ${formatSpan(wake.intervalMs)} 重复` : "";
+		return `${wake.id}: ${formatLocal(wake.dueAt)}（还有 ${formatSpan(remaining)}${cadence}）${prompt}`;
 	}
 
 	function pending(): Wake[] {
@@ -298,6 +328,7 @@ export default function (pi: ExtensionAPI) {
 				dueAt,
 				prompt: data.prompt ?? "",
 				armedAt: Number(data.armedAt) || dueAt,
+				...(Number(data.intervalMs) > 0 ? { intervalMs: Number(data.intervalMs) } : {}),
 			};
 			wakes.set(wake.id, wake);
 			arm(wake);
@@ -314,6 +345,11 @@ export default function (pi: ExtensionAPI) {
 
 	/* ---------------------------------------------------------------------- tool */
 
+	// Global installs load this extension in background subagents too (separate
+	// processes with PI_SUBAGENT_CHILD=1). A subagent must not schedule wakes:
+	// the wake would start a turn in a child that is already ending.
+	if (process.env.PI_SUBAGENT_CHILD === "1") return;
+
 	pi.registerTool({
 		name: "wake_up",
 		label: "Wake Up",
@@ -323,6 +359,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use wake_up when the user asks to be reminded later, to check on something later, or to continue at a set time.",
 			"Translate what the user said into either an absolute `at` (ISO 8601, e.g. 2026-11-12T09:30:00+08:00) or a relative `after` (e.g. 90m, 2h). Do not compute clock arithmetic yourself: pick whichever form the user's words match.",
+			"For a recurring check (\"remind me every 5 minutes\"), pass `every` with the interval instead of re-scheduling by hand.",
 			"Put the next concrete action in `prompt`, so the waking turn knows what to do without re-reading the whole conversation.",
 			"Tell the user the wake-up time you scheduled; do not claim that work will happen while pi is closed.",
 		],
@@ -371,12 +408,36 @@ export default function (pi: ExtensionAPI) {
 			// action === "schedule"
 			const hasAt = Boolean(params.at?.trim());
 			const hasAfter = Boolean(params.after?.trim());
-			if (hasAt === hasAfter) {
+			const hasEvery = Boolean(params.every?.trim());
+			if (hasAt === hasAfter && !hasEvery) {
 				return reply(
-					"给 `at`（绝对时间，ISO 8601）或 `after`（相对时长，如 90m）之一，不要都给或都不给。",
+					"给 `at`（绝对时间，ISO 8601）、`after`（相对时长，如 90m）或 `every`（重复间隔，如 5m）之一，不要 `at` 和 `after` 都给或都不给。",
 					{},
 					true,
 				);
+			}
+			if (hasAt && hasEvery) {
+				return reply(
+					"`every` 是重复提醒，不能用 `at` 定首次时间：用 `after` 定首次延迟，或直接给 `every` 让它从一整个间隔之后开始。",
+					{},
+					true,
+				);
+			}
+
+			let firstDelayMs: number | undefined;
+			let intervalMs: number | undefined;
+			if (hasAfter) {
+				const parsed = parseAfter(params.after!);
+				if ("error" in parsed) return reply(parsed.error, {}, true);
+				firstDelayMs = parsed.ms;
+			}
+			if (hasEvery) {
+				const parsed = parseAfter(params.every!);
+				if ("error" in parsed) return reply(parsed.error, {}, true);
+				if (parsed.ms < 1_000) {
+					return reply("`every` 至少 1s，否则会不停地唤醒自己。", {}, true);
+				}
+				intervalMs = parsed.ms;
 			}
 
 			let dueAt: number;
@@ -385,9 +446,7 @@ export default function (pi: ExtensionAPI) {
 				if ("error" in parsed) return reply(parsed.error, {}, true);
 				dueAt = parsed.dueAt;
 			} else {
-				const parsed = parseAfter(params.after!);
-				if ("error" in parsed) return reply(parsed.error, {}, true);
-				dueAt = Date.now() + parsed.ms;
+				dueAt = Date.now() + (firstDelayMs ?? intervalMs ?? 0);
 			}
 
 			const now = Date.now();
@@ -400,20 +459,20 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const id = `w${++counter}`;
-			const wake: Wake = { id, dueAt, prompt: params.prompt ?? "", armedAt: now };
+			const wake: Wake = { id, dueAt, prompt: params.prompt ?? "", armedAt: now, ...(intervalMs ? { intervalMs } : {}) };
 			wakes.set(id, wake);
 			arm(wake);
-			record({ id, dueAt, prompt: wake.prompt, armedAt: now });
+			record({ id, dueAt, prompt: wake.prompt, armedAt: now, ...(intervalMs ? { intervalMs } : {}) });
 
 			const others = pending().filter((item) => item.id !== id);
 			const text = [
-				`已安排 ${id}：${formatLocal(dueAt)}，还有 ${formatSpan(dueAt - now)}。`,
+				`已安排 ${id}：${formatLocal(dueAt)}，还有 ${formatSpan(dueAt - now)}${intervalMs ? `，之后每 ${formatSpan(intervalMs)} 重复` : ""}。`,
 				others.length ? `另有 ${others.length} 个待唤醒：${others.map((item) => item.id).join(", ")}。` : "",
 				"本轮可以结束了；到点后我会带着提醒重新开始一轮。",
 			]
 				.filter(Boolean)
 				.join("\n");
-			return reply(text, { scheduled: true, id, dueAt, delayMs: dueAt - now });
+			return reply(text, { scheduled: true, id, dueAt, delayMs: dueAt - now, ...(intervalMs ? { intervalMs } : {}) });
 		},
 	});
 
