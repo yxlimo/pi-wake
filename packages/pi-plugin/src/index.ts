@@ -400,6 +400,8 @@ export default function (pi: ExtensionAPI) {
 			evidence = outcome.stdout.trim().slice(0, MAX_EVIDENCE_CHARS);
 		}
 
+		// Keep the slot that fired: re-arming moves `dueAt` to the next one.
+		const firedSlot = wake.dueAt;
 		const firedAt = Date.now();
 		if (wake.intervalMs) {
 			// Fixed cadence, but never catch up: slots missed while pi was not
@@ -413,9 +415,9 @@ export default function (pi: ExtensionAPI) {
 			record({ ...baseEntry(wake), firedAt });
 		}
 
-		const late = firedAt - wake.dueAt;
+		const late = firedAt - firedSlot;
 		const lines = [
-			`⏰ 自动唤醒 · ${formatLocal(wake.dueAt)}`,
+			`⏰ 自动唤醒 · ${formatLocal(firedSlot)}`,
 			"",
 			"这是定时唤醒，不是用户发言。时间到了，继续之前的工作。",
 		];
@@ -440,7 +442,7 @@ export default function (pi: ExtensionAPI) {
 			{ customType: MESSAGE_TYPE, content: lines.join("\n"), display: true },
 			{ triggerTurn: true, deliverAs: "followUp" },
 		);
-		sessionCtx?.ui?.notify(`pi-wake: 唤醒 ${wake.id} @ ${formatLocal(wake.dueAt)}`, "info");
+		sessionCtx?.ui?.notify(`pi-wake: 唤醒 ${wake.id} @ ${formatLocal(firedSlot)}`, "info");
 	}
 
 	/** Human-readable summary of one pending wake-up. */

@@ -411,4 +411,18 @@ console.log("pi-wake");
 	console.log("  ok   whenLang: node 用 node 跑条件，且 whenLang 不能脱离 when 使用");
 }
 
+// 23. The reminder names the slot that fired, not the one it re-armed for.
+{
+	const { tools, sent } = await boot();
+	await run(tools.wake_up, { action: "schedule", every: "1s", prompt: "查 PR" });
+	await sleep(1_200);
+	assert.equal(sent.length, 1, "the repeating wake-up fires");
+	const stamp = sent[0].message.content.match(/自动唤醒 · ([^(]+)\(/)?.[1]?.trim();
+	assert.ok(stamp, "the header carries a time");
+	const firedAt = new Date(stamp.replace(/(\d+)\/(\d+)\/(\d+)/, "$3-$1-$2"));
+	const drift = Math.abs(Date.now() - firedAt.getTime() - 1_000);
+	assert.ok(drift < 900, `the header names the slot that fired, not the next one (drift ${drift}ms)`);
+	console.log("  ok   重复唤醒的提醒写触发的那一槽，而不是重排后的下一槽");
+}
+
 console.log("\npi-wake 测试通过");
