@@ -513,4 +513,21 @@ console.log("pi-wake");
 	console.log("  ok   重开会话后 wait 会重新启动命令，退出时仍能唤醒");
 }
 
+// 29. A long-running `wait` keeps the tail of its output, not the head.
+{
+	const { tools, sent } = await boot();
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		// 200 KB of stderr chatter would swallow a head-based buffer, and the same
+		// amount of stdout noise would push the interesting line out of the head.
+		wait: 'head -c 200000 /dev/zero | tr "\\0" "e" >&2; head -c 200000 /dev/zero | tr "\\0" "o"; echo "ci-failed  A required check has failed"',
+		prompt: "看 PR",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	await sleep(1_500);
+	assert.equal(sent.length, 1, "the wait fires even after a flood of output");
+	assert.match(sent[0].message.content, /ci-failed  A required check has failed/u, "the last line survives as evidence");
+	console.log("  ok   长时间运行的 wait 保留输出尾部，不被噪音挤掉");
+}
+
 console.log("\npi-wake 测试通过");

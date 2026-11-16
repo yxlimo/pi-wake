@@ -132,9 +132,10 @@ codes (`gh pr checks` exits 8 while checks are pending), so handle those
 explicitly instead of assuming 0/1.
 
 **stdout is the evidence.** On wake, stdout is pasted into the reminder (trimmed,
-capped at 4000 characters). So print a short conclusion, not a log: no `cat` of
-whole JSON, no progress chatter, and never anything secret — that text lands in
-the transcript and in the model's context.
+capped at 4000 characters; for `wait` it is the *end* of stdout, since a watcher
+that ran for hours says what it found last). So print a short conclusion, not a
+log: no `cat` of whole JSON, no progress chatter, and never anything secret —
+that text lands in the transcript and in the model's context.
 
 **stderr is invisible.** It is not part of the evidence; only `wait` failures
 quote its tail in a notification. If the failure itself is what the waking turn

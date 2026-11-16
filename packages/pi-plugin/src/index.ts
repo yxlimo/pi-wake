@@ -412,15 +412,23 @@ export default function (pi: ExtensionAPI) {
 			wake.waitLang === "node"
 				? [process.execPath, ["-e", wake.wait ?? ""]]
 				: ["/bin/sh", ["-c", wake.wait ?? ""]];
+		// A watcher can run for hours and print all the while, so the useful part is
+		// the tail: the last thing it said before exiting. Each stream has its own
+		// budget, otherwise a chatty stderr would starve the stdout we quote.
 		const out: Buffer[] = [];
 		const err: Buffer[] = [];
-		let size = 0;
 		const collect = (chunks: Buffer[], chunk: Buffer) => {
-			if (size >= MAX_CONDITION_BYTES) return;
 			chunks.push(chunk);
-			size += chunk.length;
+			let total = 0;
+			for (let index = chunks.length - 1; index >= 0; index -= 1) {
+				total += chunks[index].length;
+				if (total > MAX_CONDITION_BYTES) {
+					chunks.splice(0, index + 1);
+					return;
+				}
+			}
 		};
-		const text = (chunks: Buffer[]) => Buffer.concat(chunks).toString("utf8").slice(0, MAX_CONDITION_BYTES);
+		const text = (chunks: Buffer[]) => Buffer.concat(chunks).toString("utf8");
 		let child: ChildProcess;
 		try {
 			child = spawn(file, args, {
@@ -463,7 +471,7 @@ export default function (pi: ExtensionAPI) {
 	function dropWait(wake: Wake, why: string, stderr = "") {
 		wakes.delete(wake.id);
 		record({ ...baseEntry(wake), skippedAt: Date.now() });
-		const noise = stderr.trim().slice(0, 200);
+		const noise = stderr.trim().slice(-200);
 		sessionCtx?.ui?.notify(`pi-wake: ${wake.id} 的 wait 结束但没有唤醒（${why}${noise ? `：${noise}` : ""}）。`, "warning");
 	}
 
@@ -474,8 +482,9 @@ export default function (pi: ExtensionAPI) {
 
 		let evidence = "";
 		if (wake.wait) {
-			// The command has already run to completion; its output is the evidence.
-			evidence = (waitOutput ?? "").trim().slice(0, MAX_EVIDENCE_CHARS);
+			// The command has already run to completion; the end of its output is the
+			// part that says why it exited, so that is what the reminder quotes.
+			evidence = (waitOutput ?? "").trim().slice(-MAX_EVIDENCE_CHARS);
 			wake.lastStdout = waitOutput ?? "";
 		} else if (wake.when) {
 			const outcome = await evaluateCondition(wake);
