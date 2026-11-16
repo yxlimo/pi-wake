@@ -1,6 +1,6 @@
 ---
 name: pi-wake
-description: Use when work has to resume on its own at a later time — waiting for CI, a build, a deploy, a rate limit, or a user-requested reminder. Covers the wake_up tool (action schedule / list / cancel), the time forms (absolute `at` in ISO 8601, relative `after` like 90m, repeating `every` like 5m), what the waking turn receives, and the limits (pi must stay running).
+description: Use when work has to resume on its own later or when something that finishes on its own must wake you — waiting for CI, a build, a deploy, a rate limit, a PR watcher, or a user-requested reminder. Covers the wake_up tool (action schedule / list / cancel), the time forms (absolute `at` in ISO 8601, relative `after` like 90m, repeating `every` like 5m), `wait` for a command that decides when it is done, how to write the `when`/`wait` command, what the waking turn receives, and the limits (pi must stay running).
 ---
 
 # pi-wake: waking yourself up later
@@ -26,6 +26,7 @@ wake_up({ action: "schedule", after: "90m", prompt: "继续跑 typecheck" })
 wake_up({ action: "schedule", at: "2026-11-12T09:30:00+08:00", prompt: "看 CI 跑完没" })
 wake_up({ action: "schedule", after: "8s", prompt: "读 /tmp/build.log 最后 50 行，失败就修" })
 wake_up({ action: "schedule", every: "5m", prompt: "查 PR 的 review 与 CI，有要求就改" })
+wake_up({ action: "schedule", wait: "gh watch pr 42 --exit", prompt: "PR 有动静了：看输出" })
 ```
 
 Give `at`, `after`, or `every` — at most one of `at` and `after`:
@@ -82,6 +83,92 @@ once, because otherwise the wake-up would be silent forever.
 The command runs unsandboxed in the session's working directory, with the same
 power as the `bash` tool — a reminder is not a security boundary.
 
+## Waiting for a command instead of a time
+
+When the thing you are waiting for decides when it is done, do not guess an
+interval. `wait` starts the command now and fires the wake-up the moment it
+exits 0:
+
+```text
+wake_up({
+  action: "schedule",
+  wait: "gh watch pr 42 --repo owner/repo --interval 20s --exit-on ci-failed,ci-passed,review-submitted,comment-added --exit",
+  prompt: "PR 有动静了：读上面的输出，该改的改，该回的回",
+})
+```
+
+| field | meaning |
+| --- | --- |
+| `wait` | Command started now. Exit 0 = wake. Its stdout becomes the evidence. |
+| `waitLang` | `sh` (default, POSIX through `/bin/sh`) or `node`. |
+
+`wait` replaces the clock, so it cannot be combined with `at`, `after`, `every`
+or `when`: there is no slot to evaluate at and nothing to repeat. Put every
+judgement inside the command and express it through the exit status.
+
+- **No timeout.** The command runs for as long as it takes; that is the point.
+- **Non-zero exit wakes nothing.** The wake-up is dropped and the user is told
+  once with the exit code and the tail of stderr, because a watcher that failed
+  will not fix itself by being ignored.
+- **Killed on `cancel` and when the session ends**, so a watcher cannot outlive
+  the session that asked for it.
+- **One shot.** After it fires, schedule again if you need to keep watching.
+- **Restarted on reopen.** A pending `wait` is persisted like any other wake-up,
+  so reopening the session starts the command again.
+
+Use `wait` for things that report their own completion: `gh watch`, a long
+build, `until`-style polling with an exit code. Use `after`/`every` when the only
+thing you know is how much time should pass.
+
+## Writing the `when` / `wait` command
+
+The exit status is the entire signal, and stdout is the entire message. Both
+facts drive every rule below.
+
+**Exit status.** `0` wakes, anything else stays silent. Do not try to express
+"do not wake" in the output — output is only read after the decision is made.
+A pipeline reports its last command's status, and some tools have surprising
+codes (`gh pr checks` exits 8 while checks are pending), so handle those
+explicitly instead of assuming 0/1.
+
+**stdout is the evidence.** On wake, stdout is pasted into the reminder (trimmed,
+capped at 4000 characters). So print a short conclusion, not a log: no `cat` of
+whole JSON, no progress chatter, and never anything secret — that text lands in
+the transcript and in the model's context.
+
+**stderr is invisible.** It is not part of the evidence; only `wait` failures
+quote its tail in a notification. If the failure itself is what the waking turn
+must see, print it to stdout and `exit 0`.
+
+**With `whenChanged`, stdout is a fingerprint.** The rule is "different from the
+run that last fired", so the same world must produce byte-identical output. A
+timestamp, a duration, a random value or a PID in the output defeats it
+completely and wakes you every slot. Also avoid empty output: the baseline starts
+as `""`, so an empty string counts as unchanged and never wakes.
+
+**`whenTimeout` is a deadline, not a duration.** Default 30s, maximum 300s. The
+command is killed when it expires, and a timeout is reported once as a broken
+condition. So `when` must return quickly — never poll or sleep inside it. `wait`
+is the form to use when the command legitimately runs long.
+
+**It is `/bin/sh`, not your shell.** `whenLang: "sh"` means POSIX; zsh and fish
+syntax will fail. It runs in the session's working directory, so `cd` or use
+absolute paths when the script assumes a project root.
+
+**It runs repeatedly; keep it free of side effects.** `when` is evaluated at
+every slot, so it must only observe. No commits, no deletes, no messages, no
+state changes — decide in `when`, act in the waking turn.
+
+```sh
+# The world as a fingerprint: stable, non-empty, no timestamp.
+now=$(gh pr view 42 --repo owner/repo --json state,headRefOid \
+  --jq '"$(.state) $(.headRefOid)"' 2>&1) || { printf 'gh failed: %s\n' "$now"; exit 0; }
+
+[ -n "$now" ] || exit 1                 # nothing to report
+[ "$now" = "$PI_WAKE_LAST_STDOUT" ] && exit 1   # same as the run that last fired
+printf '%s\n' "$now"
+```
+
 ## What to put in `prompt`
 
 `prompt` is the instruction the waking turn gives itself. The waking turn keeps
@@ -101,6 +188,19 @@ would otherwise have to rediscover it.
 这是定时唤醒，不是用户发言。时间到了，继续之前的工作。
 你当时给自己的指令：看 CI 跑完没
 ```
+
+A `wait` wake-up reads differently, because nothing was scheduled:
+
+````text
+⏰ 等待的命令已结束 · 2026-11-12 09:30:00 (Asia/Shanghai)
+
+这是条件唤醒，不是用户发言。你之前排的那个等待命令退出了，且退出码为 0。
+你当时给自己的指令：PR 有动静了：读上面的输出
+唤醒时条件的输出：
+```
+ci-failed  A required check has failed
+```
+````
 
 It arrives as an extension message, not a user message, and is queued as a
 follow-up: if a turn is still running it waits for that turn to finish rather
@@ -128,6 +228,9 @@ Humans can list the same thing with the `/wake` command.
   re-arms itself after each firing; if pi was closed across several slots, the
   wake-up does not fire them back to back, it continues from the next slot. It
   stays pending until `cancel`, so cancelling is the only way to stop it.
+- **`wait` is not a background service.** It is one child process of the pi
+  process: no deadline, but also no survival. Closing pi kills it, and reopening
+  the session starts it again.
 - **Only the main session has this tool.** Background subagents load the
   extension with `PI_SUBAGENT_CHILD=1` and get no `wake_up`; a subagent that
   needs a later check reports it to the parent instead.

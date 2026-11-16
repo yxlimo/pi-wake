@@ -425,4 +425,92 @@ console.log("pi-wake");
 	console.log("  ok   重复唤醒的提醒写触发的那一槽，而不是重排后的下一槽");
 }
 
+// 24. `wait` has no clock: the command starts now and its exit fires the wake-up.
+{
+	const { tools, sent } = await boot();
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		wait: 'sleep 0.15; echo "PR 3288 ci-failed"',
+		prompt: "看 PR 3288 为什么红了",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	assert.match(textOf(result), /已开始等待 w1/, "the result names the waiting wake-up");
+	assert.equal(sent.length, 0, "nothing is sent while the command is still running");
+
+	await sleep(600);
+	assert.equal(sent.length, 1, "the exit of the command fires the wake-up");
+	assert.match(sent[0].message.content, /等待的命令已结束/, "the reminder says the command finished");
+	assert.match(sent[0].message.content, /ci-failed/u, "the command's stdout is the evidence");
+	assert.match(sent[0].message.content, /看 PR 3288 为什么红了/u, "the instruction is carried over");
+	console.log("  ok   wait 没有时间：命令退出码 0 即唤醒，stdout 作为证据");
+}
+
+// 25. A `wait` that exits non-zero reports once and drops the wake-up.
+{
+	const { tools, sent, notes } = await boot();
+	const result = await run(tools.wake_up, { action: "schedule", wait: 'echo "auth failed" >&2; exit 3' });
+	assert.equal(result.isError, undefined, textOf(result));
+	await sleep(600);
+	assert.equal(sent.length, 0, "a failing wait does not wake anything");
+	assert.ok(notes.some((note) => /没有唤醒/u.test(note.message) && /退出码 3/u.test(note.message)), "the failure is surfaced once");
+	console.log("  ok   wait 非 0 退出不唤醒，只提示一次");
+}
+
+// 26. Cancelling a `wait` kills the process instead of leaving it running.
+{
+	const { tools } = await boot();
+	const marker = path.join(os.tmpdir(), `piwake-wait-${process.pid}-${Date.now()}.txt`);
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		wait: `while true; do echo tick >> '${marker}'; sleep 0.05; done`,
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	await sleep(300);
+	assert.ok(fs.statSync(marker).size > 0, "the watcher really runs");
+
+	const cancelled = await run(tools.wake_up, { action: "cancel", all: true });
+	assert.equal(cancelled.isError, undefined, textOf(cancelled));
+	await sleep(300);
+	const settled = fs.statSync(marker).size;
+	await sleep(400);
+	assert.equal(fs.statSync(marker).size, settled, "the waiting process stops writing after cancel");
+	fs.rmSync(marker, { force: true });
+	console.log("  ok   cancel 会杀掉等待中的进程，不留孤儿");
+}
+
+// 27. `wait` owns the schedule, so it refuses everything that also sets one.
+{
+	const { tools } = await boot();
+	for (const conflict of [{ after: "1m" }, { at: "2099-01-01T00:00:00Z" }, { every: "5m" }]) {
+		const result = await run(tools.wake_up, { action: "schedule", wait: "true", ...conflict });
+		assert.equal(result.isError, true, `wait refuses ${Object.keys(conflict)[0]}`);
+	}
+	const withWhen = await run(tools.wake_up, { action: "schedule", wait: "true", when: "true" });
+	assert.equal(withWhen.isError, true, "wait refuses a second condition");
+
+	const langOnly = await run(tools.wake_up, { action: "schedule", after: "1m", waitLang: "node" });
+	assert.equal(langOnly.isError, true, "waitLang without wait is refused");
+
+	const nodeWait = await run(tools.wake_up, { action: "schedule", waitLang: "node", wait: 'console.log("node-wait-ok")' });
+	assert.equal(nodeWait.isError, undefined, textOf(nodeWait));
+	console.log("  ok   wait 与 at/after/every/when 互斥，waitLang 不能脱离 wait");
+}
+
+// 28. A waiting wake-up survives a reopened session: the command is started again.
+{
+	const { sent } = await boot({
+		entries: [
+			{
+				type: "custom",
+				customType: "wake_up",
+				data: { id: "w3", dueAt: Date.now(), armedAt: Date.now(), prompt: "恢复后继续", wait: 'echo "restored-wait"' },
+			},
+		],
+	});
+	await sleep(600);
+	assert.equal(sent.length, 1, "the restored wait fires when its command exits");
+	assert.match(sent[0].message.content, /restored-wait/u, "the restarted command supplies the evidence");
+	console.log("  ok   重开会话后 wait 会重新启动命令，退出时仍能唤醒");
+}
+
 console.log("\npi-wake 测试通过");

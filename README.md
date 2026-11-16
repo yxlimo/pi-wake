@@ -41,7 +41,7 @@ subagentOnlyExtensions: ~/extensions/pi-wake/packages/pi-plugin/src/index.ts
 
 | action | fields | effect |
 | --- | --- | --- |
-| `schedule` | `at`, `after` or `every`, plus `prompt`; optional `when` gate | arm a wake-up, returns its `id`; `every` repeats until cancelled |
+| `schedule` | `at`, `after` or `every`, or `wait`; plus `prompt`; optional `when` gate | arm a wake-up, returns its `id`; `every` repeats until cancelled; `wait` fires when its command exits |
 | `list` | — | pending wake-ups, nearest first, with the time left |
 | `cancel` | `id`, or `all: true` | drop one or all pending wake-ups |
 
@@ -64,6 +64,17 @@ the usual way to ask for "wake me only when this actually changed"; `whenTimeout
 (default 30s, max 300s) bounds it. The command reads `$PI_WAKE_ID` and
 `$PI_WAKE_LAST_STDOUT`, and its stdout is quoted in the reminder as evidence.
 
+**Wait.** `wait` replaces the clock: the command starts now and the wake-up fires
+when it exits 0 — `wake_up({ action: "schedule", wait: "gh watch pr 42 --exit",
+prompt: "PR 有动静了：看输出" })`. There is no interval and no deadline, so it
+cannot be combined with `at`, `after`, `every` or `when`. A non-zero exit wakes
+nothing: the wake-up is dropped and reported once with the exit code and the tail
+of stderr. The process is killed on `cancel` and when the session ends, and a
+pending one is started again when the session is reopened. Its stdout is the
+evidence in the reminder.
+
+Its `whenLang` counterpart is `waitLang` (`sh` default, or `node`).
+
 **Prompt.** `prompt` is what the waking turn is told to do. Write the next
 action, not a restatement of the task — the waking turn still has the whole
 conversation, so "看 CI 跑完没" is enough and "keep working on the thing" is not.
@@ -79,6 +90,18 @@ can confirm the time was read the way you meant.
 你当时给自己的指令：看 CI 跑完没
 ```
 
+A `wait` wake-up says the command finished rather than naming a time:
+
+````text
+⏰ 等待的命令已结束 · 2026-11-12 09:30:00 (Asia/Shanghai)
+
+这是条件唤醒，不是用户发言。你之前排的那个等待命令退出了，且退出码为 0。
+唤醒时条件的输出：
+```
+ci-failed  A required check has failed
+```
+````
+
 The message is injected as an extension message, marked as an automatic wake-up
 so the model does not mistake it for the user speaking. It starts a new turn when
 pi is idle; if a turn is still running at that moment, it is queued as a
@@ -93,6 +116,11 @@ conventions without anything added to `AGENTS.md`:
 - when a wake-up is the right tool and when it is not
 - the time forms (`at`, `after`, repeating `every`) and how to translate what a
   user said into one of them
+- `wait` for work that reports its own completion, and when a watcher is better
+  than an interval
+- how to write the `when`/`wait` command: the exit status is the whole signal,
+  stdout is the evidence, a timestamp in that output defeats `whenChanged`, and
+  `when` must not poll in a loop
 - what belongs in `prompt` (the next action, plus any path or URL it needs)
 - the limits worth mentioning to a user: pi must be running, and a repeating
   wake-up keeps going until it is cancelled
