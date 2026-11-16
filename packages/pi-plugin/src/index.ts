@@ -364,14 +364,14 @@ export default function (pi: ExtensionAPI) {
 			}
 			const timer = setTimeout(() => {
 				child.kill("SIGKILL");
-				finish({ ok: false, stdout: text(stdout), stderr: text(stderr), broken: `超过 ${Math.round(timeout / 1000)}s 没有返回` });
+				finish({ ok: false, stdout: text(stdout), stderr: text(stderr), broken: `no answer after ${Math.round(timeout / 1000)}s` });
 			}, timeout);
 			timer.unref?.();
 			child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
 			child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
 			child.once("error", (error) => finish({ ok: false, stdout: text(stdout), stderr: text(stderr), broken: error.message }));
 			child.once("close", (code, signal) => {
-				const broken = code === 0 ? undefined : signal ? `被信号 ${signal} 终止` : undefined;
+				const broken = code === 0 ? undefined : signal ? `killed by ${signal}` : undefined;
 				finish({ ok: code === 0, stdout: text(stdout), stderr: text(stderr), ...(broken ? { broken } : {}) });
 			});
 		});
@@ -395,7 +395,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		wakes.delete(wake.id);
 		record({ ...baseEntry(wake), skippedAt: now });
-		sessionCtx?.ui?.notify(`pi-wake: ${wake.id} 的条件不满足（${reason}），一次性唤醒已丢弃。`, "info");
+		sessionCtx?.ui?.notify(`pi-wake: ${wake.id}: condition not met (${reason}); the one-shot wake-up was dropped.`, "info");
 	}
 
 	/**
@@ -463,8 +463,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const why = summary.signal
-				? `被信号 ${summary.signal} 终止`
-				: `退出码 ${summary.code === null ? "未知" : summary.code}`;
+				? `killed by ${summary.signal}`
+				: `exit code ${summary.code === null ? "unknown" : summary.code}`;
 			dropWait(wake, why, text(err));
 		};
 		child.once("error", (error) => finish({ error: error.message }));
@@ -501,7 +501,7 @@ export default function (pi: ExtensionAPI) {
 		wakes.delete(wake.id);
 		record({ ...baseEntry(wake), skippedAt: Date.now() });
 		const noise = stderr.trim().slice(-200);
-		sessionCtx?.ui?.notify(`pi-wake: ${wake.id} 的 wait 结束但没有唤醒（${why}${noise ? `：${noise}` : ""}）。`, "warning");
+		sessionCtx?.ui?.notify(`pi-wake: ${wake.id}: the wait command ended without waking (${why}${noise ? `: ${noise}` : ""}).`, "warning");
 	}
 
 	/** Start the waking turn; a repeating wake-up re-arms itself for its next slot. */
@@ -521,14 +521,14 @@ export default function (pi: ExtensionAPI) {
 			if (wakes.get(id) !== wake) return;
 			if (outcome.broken && !wake.reportedBroken) {
 				wake.reportedBroken = true;
-				sessionCtx?.ui?.notify(`pi-wake: ${wake.id} 的 when 条件无法正常执行：${outcome.broken}`, "warning");
+				sessionCtx?.ui?.notify(`pi-wake: ${wake.id}: the when condition could not run: ${outcome.broken}`, "warning");
 			}
 			const changed = !wake.whenChanged || outcome.stdout !== (wake.lastStdout ?? "");
 			if (!outcome.ok || !changed) {
-				let reason = "输出没有变化";
+				let reason = "output unchanged";
 				if (!outcome.ok) {
 					const noise = outcome.stderr.trim().slice(0, 200);
-					reason = noise ? `退出码非 0：${noise}` : "退出码非 0";
+					reason = noise ? `exit code non-zero: ${noise}` : "exit code non-zero";
 				}
 				skip(wake, reason);
 				return;
@@ -555,28 +555,28 @@ export default function (pi: ExtensionAPI) {
 		const late = firedAt - firedSlot;
 		const lines = wake.wait
 			? [
-					`⏰ 等待的命令已结束 · ${formatLocal(firedAt)}`,
+					`⏰ Wait command finished · ${formatLocal(firedAt)}`,
 					"",
-					"这是条件唤醒，不是用户发言。你之前排的那个等待命令退出了，且退出码为 0。",
+					"This is a conditional wake-up, not the user speaking. The command you were waiting on exited with status 0.",
 				]
 			: [
-					`⏰ 自动唤醒 · ${formatLocal(firedSlot)}`,
+					`⏰ Scheduled wake-up · ${formatLocal(firedSlot)}`,
 					"",
-					"这是定时唤醒，不是用户发言。时间到了，继续之前的工作。",
+					"This is a scheduled wake-up, not the user speaking. The time has come; carry on with the work.",
 				];
 		if (!wake.wait && late > 5_000) {
-			lines.push(`（比预定时间晚了 ${formatSpan(late)}——期间 pi 没有在运行。）`);
+			lines.push(`(Fired ${formatSpan(late)} late — pi was not running.)`);
 		}
 		lines.push(
 			wake.prompt.trim()
-				? `你当时给自己的指令：${wake.prompt.trim()}`
-				: "你当时没有写下具体指令，按当前上下文继续。",
+				? `The instruction you left for yourself: ${wake.prompt.trim()}`
+				: "You left no instruction; continue from the current context.",
 		);
 		if (evidence) {
-			lines.push("", "唤醒时条件的输出：", "```", evidence, "```");
+			lines.push("", "Condition output at wake time:", "```", evidence, "```");
 		}
 		if (wake.intervalMs) {
-			lines.push(`（这是每 ${formatSpan(wake.intervalMs)} 重复的提醒，下次 ${formatLocal(wake.dueAt)}。不需要了就 cancel。）`);
+			lines.push(`(Repeats every ${formatSpan(wake.intervalMs)}; next at ${formatLocal(wake.dueAt)}. Cancel it when it is no longer needed.)`);
 		}
 
 		// `followUp` keeps a running turn intact; when idle it is ignored and
@@ -585,19 +585,19 @@ export default function (pi: ExtensionAPI) {
 			{ customType: MESSAGE_TYPE, content: lines.join("\n"), display: true },
 			{ triggerTurn: true, deliverAs: "followUp" },
 		);
-		sessionCtx?.ui?.notify(`pi-wake: 唤醒 ${wake.id} @ ${formatLocal(firedSlot)}`, "info");
+		sessionCtx?.ui?.notify(`pi-wake: wake ${wake.id} @ ${formatLocal(firedSlot)}`, "info");
 	}
 
 	/** Human-readable summary of one pending wake-up. */
 	function describe(wake: Wake): string {
 		const prompt = wake.prompt.trim() ? ` — "${wake.prompt.trim()}"` : "";
 		if (wake.wait) {
-			return `${wake.id}: 等待命令退出（已等 ${formatSpan(Date.now() - wake.armedAt)}）${prompt}`;
+			return `${wake.id}: waiting for the command to exit (${formatSpan(Date.now() - wake.armedAt)} elapsed)${prompt}`;
 		}
 		const remaining = wake.dueAt - Date.now();
-		const cadence = wake.intervalMs ? `，每 ${formatSpan(wake.intervalMs)} 重复` : "";
-		const gate = wake.when ? "，条件满足才唤醒" : "";
-		return `${wake.id}: ${formatLocal(wake.dueAt)}（还有 ${formatSpan(remaining)}${cadence}${gate}）${prompt}`;
+		const cadence = wake.intervalMs ? `, repeats every ${formatSpan(wake.intervalMs)}` : "";
+		const gate = wake.when ? ", wakes only when the condition holds" : "";
+		return `${wake.id}: ${formatLocal(wake.dueAt)} (in ${formatSpan(remaining)}${cadence}${gate})${prompt}`;
 	}
 
 	function pending(): Wake[] {
@@ -693,7 +693,7 @@ export default function (pi: ExtensionAPI) {
 				const list = pending();
 				const text = list.length
 					? list.map((wake) => `- ${describe(wake)}`).join("\n")
-					: "没有待唤醒的定时器。";
+					: "No pending wake-ups.";
 				return reply(text, { count: list.length });
 			}
 
@@ -706,17 +706,17 @@ export default function (pi: ExtensionAPI) {
 						wakes.delete(wake.id);
 						record({ id: wake.id, dueAt: wake.dueAt, cancelledAt: Date.now() });
 					}
-					return reply(`已取消 ${list.length} 个定时器。`, { cancelled: list.length });
+					return reply(`Cancelled ${list.length} wake-up(s).`, { cancelled: list.length });
 				}
 				const id = params.id?.trim();
 				if (!id) {
-					return reply("取消需要给 id，或传 all: true 取消全部。", {}, true);
+					return reply("cancel needs an id, or all: true to drop every wake-up.", {}, true);
 				}
 				const wake = wakes.get(id);
 				if (!wake) {
 					const known = pending().map((item) => item.id);
 					return reply(
-						`没有 id 为 "${id}" 的定时器。${known.length ? `待唤醒：${known.join(", ")}` : "当前没有待唤醒的定时器。"}`,
+						`No wake-up with id "${id}". ${known.length ? `Pending: ${known.join(", ")}` : "There are no pending wake-ups."}`,
 						{},
 						true,
 					);
@@ -725,7 +725,7 @@ export default function (pi: ExtensionAPI) {
 				killWaitChild(wake);
 				wakes.delete(id);
 				record({ id, dueAt: wake.dueAt, cancelledAt: Date.now() });
-				return reply(`已取消 ${id}（原定 ${formatLocal(wake.dueAt)}）。`, { cancelled: 1 });
+				return reply(`Cancelled ${id} (was due ${formatLocal(wake.dueAt)}).`, { cancelled: 1 });
 			}
 
 			// action === "schedule"
@@ -734,21 +734,21 @@ export default function (pi: ExtensionAPI) {
 			const hasAfter = Boolean(params.after?.trim());
 			const hasEvery = Boolean(params.every?.trim());
 			if (wait && (hasAt || hasAfter || hasEvery)) {
-				return reply("`wait` 自己决定什么时候唤醒：它没有时间间隔，所以不能再给 `at`、`after` 或 `every`。", {}, true);
+				return reply("`wait` decides when to wake on its own: it has no interval, so it does not take `at`, `after` or `every`.", {}, true);
 			}
 			if (params.waitLang && !wait) {
-				return reply("`waitLang` 只跟 `wait` 一起用。", {}, true);
+				return reply("`waitLang` only applies to `wait`.", {}, true);
 			}
 			if (!wait && hasAt === hasAfter && !hasEvery) {
 				return reply(
-					"给 `at`（绝对时间，ISO 8601）、`after`（相对时长，如 90m）或 `every`（重复间隔，如 5m）之一，不要 `at` 和 `after` 都给或都不给。",
+					"Give one of `at` (absolute, ISO 8601), `after` (a delay such as 90m) or `every` (a repeat interval such as 5m) — not both `at` and `after`, and not neither.",
 					{},
 					true,
 				);
 			}
 			if (hasAt && hasEvery) {
 				return reply(
-					"`every` 是重复提醒，不能用 `at` 定首次时间：用 `after` 定首次延迟，或直接给 `every` 让它从一整个间隔之后开始。",
+					"`every` repeats, so it cannot take `at` for the first firing: use `after` for the first delay, or let `every` start one full interval from now.",
 					{},
 					true,
 				);
@@ -756,10 +756,10 @@ export default function (pi: ExtensionAPI) {
 
 			const when = params.when?.trim();
 			if (wait && when) {
-				return reply("`wait` 本身就是条件（命令退出即唤醒），不能再叠 `when`：把要判断的东西写进 `wait` 脚本，用退出码表达。", {}, true);
+				return reply("`wait` is already the condition (it wakes when the command exits), so it does not take `when`: put the test inside the `wait` script and express it as an exit code.", {}, true);
 			}
 			if (!when && (params.whenLang || params.whenChanged !== undefined || params.whenTimeout !== undefined)) {
-				return reply("`whenLang`、`whenChanged`、`whenTimeout` 只跟 `when` 一起用，没有 `when` 时它们没有意义。", {}, true);
+				return reply("`whenLang`, `whenChanged` and `whenTimeout` only apply to `when`; without it they mean nothing.", {}, true);
 			}
 
 			let firstDelayMs: number | undefined;
@@ -773,7 +773,7 @@ export default function (pi: ExtensionAPI) {
 				const parsed = parseAfter(params.every!);
 				if ("error" in parsed) return reply(parsed.error, {}, true);
 				if (parsed.ms < 1_000) {
-					return reply("`every` 至少 1s，否则会不停地唤醒自己。", {}, true);
+					return reply("`every` must be at least 1s, otherwise it would wake itself continuously.", {}, true);
 				}
 				intervalMs = parsed.ms;
 			}
@@ -792,7 +792,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (!wait && dueAt <= now) {
 				return reply(
-					`那个时间已经过去了（现在是 ${formatLocal(now)}）。要立刻继续就正常做事；要稍后，请给一个将来的时间或 after。`,
+					`That time has already passed (now ${formatLocal(now)}). To continue now, simply work; to wake later, give a future time or an \`after\` delay.`,
 					{},
 					true,
 				);
@@ -817,19 +817,19 @@ export default function (pi: ExtensionAPI) {
 			record(baseEntry(wake));
 
 			const others = pending().filter((item) => item.id !== id);
-			const othersLine = others.length ? `另有 ${others.length} 个待唤醒：${others.map((item) => item.id).join(", ")}。` : "";
+			const othersLine = others.length ? `There are ${others.length} other pending wake-up(s): ${others.map((item) => item.id).join(", ")}.` : "";
 			const text = wake.wait
 				? [
-						`已开始等待 ${id}：命令退出码 0 就唤醒你。没有时间间隔，也没有超时；cancel 会杀掉它，会话结束也会杀掉它。`,
+						`Started waiting on ${id}: a 0 exit wakes you. There is no interval and no timeout; cancel kills it, and so does the end of the session.`,
 						othersLine,
-						"本轮可以结束了；命令退出后我会带着它的输出重新开始一轮。",
+						"You can end this turn; when the command exits I will start a new one with its output.",
 					]
 						.filter(Boolean)
 						.join("\n")
 				: [
-						`已安排 ${id}：${formatLocal(dueAt)}，还有 ${formatSpan(dueAt - now)}${intervalMs ? `，之后每 ${formatSpan(intervalMs)} 重复` : ""}${when ? `，每次先跑 when 条件，退出码 0${params.whenChanged ? "且输出有变化" : ""}才唤醒` : ""}。`,
+						`Scheduled ${id}: ${formatLocal(dueAt)}, in ${formatSpan(dueAt - now)}${intervalMs ? `, then every ${formatSpan(intervalMs)}` : ""}${when ? `, and each time the when condition must exit 0${params.whenChanged ? " with changed output" : ""}` : ""}.`,
 						othersLine,
-						"本轮可以结束了；到点后我会带着提醒重新开始一轮。",
+						"You can end this turn; at that time I will start a new one with the reminder.",
 					]
 						.filter(Boolean)
 						.join("\n");
@@ -852,7 +852,7 @@ export default function (pi: ExtensionAPI) {
 			const list = pending();
 			const lines = list.length
 				? ["pi-wake:"].concat(list.map((wake) => `- ${describe(wake)}`))
-				: ["pi-wake: 没有待唤醒的定时器。"];
+				: ["pi-wake: no pending wake-ups."];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});

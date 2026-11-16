@@ -184,20 +184,20 @@ would otherwise have to rediscover it.
 ## What the waking turn gets
 
 ```text
-⏰ 自动唤醒 · 2026-11-12 09:30:00 (Asia/Shanghai)
+⏰ Scheduled wake-up · 2026-11-12 09:30:00 (Asia/Shanghai)
 
-这是定时唤醒，不是用户发言。时间到了，继续之前的工作。
-你当时给自己的指令：看 CI 跑完没
+This is a scheduled wake-up, not the user speaking. The time has come; carry on with the work.
+The instruction you left for yourself: check whether CI finished
 ```
 
 A `wait` wake-up reads differently, because nothing was scheduled:
 
 ````text
-⏰ 等待的命令已结束 · 2026-11-12 09:30:00 (Asia/Shanghai)
+⏰ Wait command finished · 2026-11-12 09:30:00 (Asia/Shanghai)
 
-这是条件唤醒，不是用户发言。你之前排的那个等待命令退出了，且退出码为 0。
-你当时给自己的指令：PR 有动静了：读上面的输出
-唤醒时条件的输出：
+This is a conditional wake-up, not the user speaking. The command you were waiting on exited with status 0.
+The instruction you left for yourself: the PR moved — read the output above
+Condition output at wake time:
 ```
 ci-failed  A required check has failed
 ```

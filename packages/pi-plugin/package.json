@@ -4,6 +4,13 @@
   "description": "Schedule a self wake-up: pi ends the turn and starts a new one at the chosen time",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yxlimo/pi-wake.git",
+    "directory": "packages/pi-plugin"
+  },
+  "homepage": "https://github.com/yxlimo/pi-wake#readme",
+  "bugs": "https://github.com/yxlimo/pi-wake/issues",
   "keywords": [
     "pi",
     "pi-extension",

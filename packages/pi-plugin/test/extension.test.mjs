@@ -70,7 +70,7 @@ console.log("pi-wake");
 	const { tools, sent, notes, entries } = await boot();
 	const result = await run(tools.wake_up, { action: "schedule", after: "120ms", prompt: "继续跑 typecheck" });
 	assert.equal(result.isError, undefined, textOf(result));
-	assert.match(textOf(result), /已安排 w1/, "the result names the wake-up");
+	assert.match(textOf(result), /Scheduled w1/, "the result names the wake-up");
 	assert.equal(entries.length, 1, "the schedule is persisted as a session entry");
 
 	assert.equal(sent.length, 0, "nothing is sent before the time is due");
@@ -80,11 +80,11 @@ console.log("pi-wake");
 	const { message, options } = sent[0];
 	assert.equal(message.customType, "wake_up", "the reminder has its own message type");
 	assert.equal(message.display, true, "the reminder is visible in the transcript");
-	assert.match(message.content, /自动唤醒/, "the reminder says it is an automatic wake-up");
-	assert.match(message.content, /不是用户发言/, "the reminder tells the model this is not the user");
+	assert.match(message.content, /Scheduled wake-up/, "the reminder says it is a scheduled wake-up");
+	assert.match(message.content, /not the user speaking/, "the reminder tells the model this is not the user");
 	assert.match(message.content, /继续跑 typecheck/, "the instruction for the waking turn is carried over");
 	assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" }, "it starts a turn without interrupting");
-	assert.match(notes.at(-1).message, /唤醒 w1/, "the user is told the wake-up fired");
+	assert.match(notes.at(-1).message, /wake w1/, "the user is told the wake-up fired");
 	console.log("  ok   after 到点触发，提醒消息带上当时的指令");
 }
 
@@ -94,7 +94,7 @@ console.log("pi-wake");
 	const at = new Date(Date.now() + 150).toISOString();
 	const result = await run(tools.wake_up, { action: "schedule", at, prompt: "看 CI" });
 	assert.equal(result.isError, undefined, textOf(result));
-	assert.match(textOf(result), /已安排 w1/);
+	assert.match(textOf(result), /Scheduled w1/);
 	await sleep(260);
 	assert.equal(sent.length, 1, "an absolute time fires too");
 	assert.match(sent[0].message.content, /看 CI/);
@@ -107,7 +107,7 @@ console.log("pi-wake");
 	const at = new Date(Date.now() - 60_000).toISOString();
 	const result = await run(tools.wake_up, { action: "schedule", at });
 	assert.equal(result.isError, true, "a past time is an error");
-	assert.match(textOf(result), /已经过去/, "the message explains why");
+	assert.match(textOf(result), /already passed/, "the message explains why");
 	console.log("  ok   过去的时间被拒绝，并给出当前时间");
 }
 
@@ -176,7 +176,7 @@ console.log("pi-wake");
 	const { tools } = await boot();
 	const result = await run(tools.wake_up, { action: "cancel", id: "w9" });
 	assert.equal(result.isError, true);
-	assert.match(textOf(result), /没有 id 为 "w9"/);
+	assert.match(textOf(result), /No wake-up with id "w9"/);
 	const noId = await run(tools.wake_up, { action: "cancel" });
 	assert.equal(noId.isError, true, "cancel needs an id or all");
 	console.log("  ok   取消未知 id / 缺 id 都有明确报错");
@@ -208,7 +208,7 @@ console.log("pi-wake");
 	await sleep(120);
 	assert.equal(sent.length, 1, "the overdue wake-up fires on reopen");
 	assert.match(sent[0].message.content, /过期的/);
-	assert.match(sent[0].message.content, /晚了/, "it says the wake-up is late");
+	assert.match(sent[0].message.content, /late/, "it says the wake-up is late");
 	console.log("  ok   重开会话时恢复未完成的唤醒，过期的立刻补发并说明迟到");
 }
 
@@ -254,11 +254,11 @@ console.log("pi-wake");
 	const result = await run(tools.wake_up, { action: "schedule", every: "1s", prompt: "查两个 PR 的状态" });
 	assert.equal(result.isError, undefined, textOf(result));
 	assert.equal(result.details.intervalMs, 1_000, "the interval is reported back");
-	assert.match(textOf(result), /重复/, "the result says it repeats");
+	assert.match(textOf(result), /then every/, "the result says it repeats");
 
 	await sleep(1_100);
 	assert.equal(sent.length, 1, "the first slot fires");
-	assert.match(sent[0].message.content, /重复/, "the reminder says it will come back");
+	assert.match(sent[0].message.content, /Repeats every/, "the reminder says it will come back");
 
 	await sleep(1_100);
 	assert.equal(sent.length, 2, "it fires again without being re-scheduled");
@@ -295,7 +295,7 @@ console.log("pi-wake");
 	const entries = [{ type: "custom", customType: "wake_up", data: { id: "w9", dueAt: Date.now() + 80, intervalMs: 1_000 } }];
 	const { tools, sent, entries: recorded } = await boot({ entries });
 	const list = await run(tools.wake_up, { action: "list" });
-	assert.match(textOf(list), /每 1s 重复/, "the pending list shows the cadence");
+	assert.match(textOf(list), /repeats every 1s/, "the pending list shows the cadence");
 
 	await sleep(120);
 	assert.equal(sent.length, 1, "the restored repeating wake-up fires");
@@ -377,7 +377,7 @@ console.log("pi-wake");
 	await sleep(250);
 	assert.equal(sent.length, 0, "no turn starts");
 	assert.equal((await run(tools.wake_up, { action: "list" })).details.count, 0, "the wake-up is gone");
-	assert.ok(notes.some((note) => /已丢弃/.test(note.message)), "the user is told instead of waiting forever");
+	assert.ok(notes.some((note) => /dropped/.test(note.message)), "the user is told instead of waiting forever");
 	console.log("  ok   一次性唤醒条件不满足则丢弃并提示");
 }
 
@@ -387,7 +387,7 @@ console.log("pi-wake");
 	await run(tools.wake_up, { action: "schedule", after: "100ms", when: "sleep 5", whenTimeout: 1, prompt: "查 PR" });
 	await sleep(1_400);
 	assert.equal(sent.length, 0, "a timed-out condition does not wake anything");
-	assert.ok(notes.some((note) => /无法正常执行/.test(note.message)), "the broken condition is surfaced");
+	assert.ok(notes.some((note) => /could not run/.test(note.message)), "the broken condition is surfaced");
 	console.log("  ok   条件超时按不满足处理，并提示一次而不是静默永不唤醒");
 }
 
@@ -417,7 +417,7 @@ console.log("pi-wake");
 	await run(tools.wake_up, { action: "schedule", every: "1s", prompt: "查 PR" });
 	await sleep(1_200);
 	assert.equal(sent.length, 1, "the repeating wake-up fires");
-	const stamp = sent[0].message.content.match(/自动唤醒 · ([^(]+)\(/)?.[1]?.trim();
+	const stamp = sent[0].message.content.match(/Scheduled wake-up · ([^(]+)\(/)?.[1]?.trim();
 	assert.ok(stamp, "the header carries a time");
 	const firedAt = new Date(stamp.replace(/(\d+)\/(\d+)\/(\d+)/, "$3-$1-$2"));
 	const drift = Math.abs(Date.now() - firedAt.getTime() - 1_000);
@@ -430,18 +430,18 @@ console.log("pi-wake");
 	const { tools, sent } = await boot();
 	const result = await run(tools.wake_up, {
 		action: "schedule",
-		wait: 'sleep 0.15; echo "PR 3288 ci-failed"',
-		prompt: "看 PR 3288 为什么红了",
+		wait: 'sleep 0.15; echo "PR 42 ci-failed"',
+		prompt: "看 PR 42 为什么红了",
 	});
 	assert.equal(result.isError, undefined, textOf(result));
-	assert.match(textOf(result), /已开始等待 w1/, "the result names the waiting wake-up");
+	assert.match(textOf(result), /Started waiting on w1/, "the result names the waiting wake-up");
 	assert.equal(sent.length, 0, "nothing is sent while the command is still running");
 
 	await sleep(600);
 	assert.equal(sent.length, 1, "the exit of the command fires the wake-up");
-	assert.match(sent[0].message.content, /等待的命令已结束/, "the reminder says the command finished");
+	assert.match(sent[0].message.content, /Wait command finished/, "the reminder says the command finished");
 	assert.match(sent[0].message.content, /ci-failed/u, "the command's stdout is the evidence");
-	assert.match(sent[0].message.content, /看 PR 3288 为什么红了/u, "the instruction is carried over");
+	assert.match(sent[0].message.content, /看 PR 42 为什么红了/u, "the instruction is carried over");
 	console.log("  ok   wait 没有时间：命令退出码 0 即唤醒，stdout 作为证据");
 }
 
@@ -452,7 +452,7 @@ console.log("pi-wake");
 	assert.equal(result.isError, undefined, textOf(result));
 	await sleep(600);
 	assert.equal(sent.length, 0, "a failing wait does not wake anything");
-	assert.ok(notes.some((note) => /没有唤醒/u.test(note.message) && /退出码 3/u.test(note.message)), "the failure is surfaced once");
+	assert.ok(notes.some((note) => /without waking/u.test(note.message) && /exit code 3/u.test(note.message)), "the failure is surfaced once");
 	console.log("  ok   wait 非 0 退出不唤醒，只提示一次");
 }
 
