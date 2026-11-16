@@ -16,6 +16,14 @@ wake_up({ action: "cancel", all: true })
 
 ## Install
 
+From npm, which is also what the pi package gallery lists:
+
+```bash
+pi install npm:@yxlimo/pi-wake
+```
+
+From a clone:
+
 ```bash
 cd packages/pi-plugin
 ./install.sh

@@ -1,5 +1,5 @@
 {
-  "name": "pi-wake",
+  "name": "@yxlimo/pi-wake",
   "version": "0.1.0",
   "description": "Schedule a self wake-up: pi ends the turn and starts a new one at the chosen time",
   "type": "module",
@@ -13,6 +13,7 @@
   "bugs": "https://github.com/yxlimo/pi-wake/issues",
   "keywords": [
     "pi",
+    "pi-package",
     "pi-extension",
     "scheduler",
     "timer",
@@ -24,16 +25,26 @@
     ]
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node test/extension.test.mjs"
+    "test": "node test/extension.test.mjs",
+    "prepack": "cp -f ../../README.md ../../LICENSE ."
+  },
+  "dependencies": {
+    "typebox": "^1.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^1.4.0",
     "@types/node": "^24.0.0",
-    "typebox": "^1.0.0",
     "typescript": "^5.9.0"
   },
   "files": [

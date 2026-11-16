@@ -1,3 +1,7 @@
 node_modules/
 *.log
 *.tsbuildinfo
+
+# prepack 从仓库根拷进来，不入版本库
+README.md
+LICENSE
