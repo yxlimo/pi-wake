@@ -530,4 +530,27 @@ console.log("pi-wake");
 	console.log("  ok   长时间运行的 wait 保留输出尾部，不被噪音挤掉");
 }
 
+// 30. Cancelling kills the grandchildren too, not just the shell that started them.
+{
+	const { tools } = await boot();
+	const marker = path.join(os.tmpdir(), `piwake-tree-${process.pid}-${Date.now()}.txt`);
+	// Shaped like `gh watch`: a wrapper that execs a second binary which does the
+	// polling. Signalling only the wrapper leaves that binary running forever.
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		wait: `sh -c 'while true; do echo tick >> "$0"; sleep 0.05; done' '${marker}' & wait`,
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	await sleep(400);
+	assert.ok(fs.statSync(marker).size > 0, "the inner watcher really runs");
+
+	await run(tools.wake_up, { action: "cancel", all: true });
+	await sleep(400);
+	const settled = fs.statSync(marker).size;
+	await sleep(500);
+	assert.equal(fs.statSync(marker).size, settled, "the grandchild stops writing after cancel");
+	fs.rmSync(marker, { force: true });
+	console.log("  ok   cancel 连同孙进程一起杀掉，不留孤儿 watcher");
+}
+
 console.log("\npi-wake 测试通过");

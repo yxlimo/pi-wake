@@ -435,6 +435,10 @@ export default function (pi: ExtensionAPI) {
 				cwd: process.cwd(),
 				env: { ...process.env, PI_WAKE_ID: wake.id, PI_WAKE_LAST_STDOUT: wake.lastStdout ?? "" },
 				stdio: ["ignore", "pipe", "pipe"],
+				// A watcher starts children of its own — `gh watch` execs a gh-watch
+				// binary — and signalling just the shell leaves them polling forever.
+				// Its own process group makes the whole tree killable at once.
+				detached: process.platform !== "win32",
 			});
 		} catch (error) {
 			dropWait(wake, error instanceof Error ? error.message : String(error));
@@ -465,6 +469,31 @@ export default function (pi: ExtensionAPI) {
 		};
 		child.once("error", (error) => finish({ error: error.message }));
 		child.once("close", (code, signal) => finish({ code, signal }));
+	}
+
+	/**
+	 * Kill a `wait` command and the processes it started.
+	 *
+	 * Signalling the group rather than the process matters because the interesting
+	 * watchers are wrappers: `gh watch` runs a separate gh-watch binary, so a
+	 * SIGTERM to the shell alone leaves the watcher reparented to init, still
+	 * polling. SIGTERM first, SIGKILL for anything that ignores it.
+	 */
+	function killWaitChild(wake: Wake) {
+		const child = wake.child;
+		const pid = child?.pid;
+		if (!child || !pid) return;
+		const signal = (name: NodeJS.Signals) => {
+			try {
+				if (process.platform === "win32") child.kill(name);
+				else process.kill(-pid, name);
+			} catch {
+				// The process is already gone; nothing to escalate to.
+			}
+		};
+		signal("SIGTERM");
+		const escalate = setTimeout(() => signal("SIGKILL"), 2_000);
+		escalate.unref?.();
 	}
 
 	/** Drop a `wait` wake-up that ended without waking, telling the user why once. */
@@ -629,7 +658,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		for (const wake of wakes.values()) {
 			if (wake.timer) clearTimeout(wake.timer);
-			wake.child?.kill("SIGTERM");
+			killWaitChild(wake);
 		}
 		wakes.clear();
 		sessionCtx = undefined;
@@ -673,7 +702,7 @@ export default function (pi: ExtensionAPI) {
 					const list = pending();
 					for (const wake of list) {
 						if (wake.timer) clearTimeout(wake.timer);
-						wake.child?.kill("SIGTERM");
+						killWaitChild(wake);
 						wakes.delete(wake.id);
 						record({ id: wake.id, dueAt: wake.dueAt, cancelledAt: Date.now() });
 					}
@@ -693,7 +722,7 @@ export default function (pi: ExtensionAPI) {
 					);
 				}
 				if (wake.timer) clearTimeout(wake.timer);
-				wake.child?.kill("SIGTERM");
+				killWaitChild(wake);
 				wakes.delete(id);
 				record({ id, dueAt: wake.dueAt, cancelledAt: Date.now() });
 				return reply(`已取消 ${id}（原定 ${formatLocal(wake.dueAt)}）。`, { cancelled: 1 });
