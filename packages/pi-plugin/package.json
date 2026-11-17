@@ -1,6 +1,6 @@
 {
   "name": "@yxlimo/pi-wake",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Schedule a self wake-up: pi ends the turn and starts a new one at the chosen time",
   "type": "module",
   "license": "MIT",
