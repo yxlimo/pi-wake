@@ -171,3 +171,24 @@ install.
 The tests load the extension against a fake pi API and use real timers, so they
 cover arming, firing, cancelling, session restore, the long-delay chunking, and
 the published skill directory.
+
+## Releasing
+
+```bash
+# bump "version" in packages/pi-plugin/package.json, then
+git commit -am "chore(release): v0.2.0"
+git tag v0.2.0 && git push --tags
+```
+
+The tag is the release: `.github/workflows/publish.yml` runs the type check and
+the tests, refuses to publish when the tag and `package.json` disagree, publishes
+to npm, and creates the GitHub release. A version that is already on the registry
+is skipped, so re-running a half-finished workflow is safe.
+
+Authentication is one of:
+
+- **Trusted publishing** (preferred, nothing stored in this repository): on
+  npmjs.com open the package, then Settings → Trusted publishing → GitHub
+  Actions, with repository `yxlimo/pi-wake` and workflow `publish.yml`.
+- **`NPM_TOKEN`**: a granular access token with "bypass 2FA", saved as a
+  repository secret. Needed only when trusted publishing is unavailable.

@@ -1,0 +1,96 @@
+name: Publish
+
+# Publishing is driven by a tag, not by a push to main: `git tag v0.2.0 &&
+# git push --tags` is the whole release action. The version that gets published
+# is the one in package.json, and the workflow refuses to run when the tag and
+# package.json disagree, so a stray tag cannot publish a version nobody bumped.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        with:
+          version: 12
+
+      # Trusted publishing needs npm >= 11.5.1; node 24 ships a newer npm than
+      # the node 22 used by the check workflow.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: packages/pi-plugin/pnpm-lock.yaml
+
+      - name: Tag matches package.json
+        working-directory: packages/pi-plugin
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the" \
+              "package.json version $version"
+            exit 1
+          fi
+          echo "tag and package.json agree on $version"
+
+      - name: Install dependencies
+        working-directory: packages/pi-plugin
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        working-directory: packages/pi-plugin
+        run: pnpm run typecheck
+
+      - name: Tests
+        working-directory: packages/pi-plugin
+        run: pnpm test
+
+      # Two ways to authenticate, checked in this order:
+      #   NPM_TOKEN        — a granular token with "bypass 2FA", stored as a
+      #                      repository secret;
+      #   trusted publishing — nothing stored anywhere: npm exchanges the job's
+      #                      OIDC token for a short-lived credential. Set it up
+      #                      once at npmjs.com -> the package -> Settings ->
+      #                      Trusted publishing -> GitHub Actions.
+      - name: Publish to npm
+        working-directory: packages/pi-plugin
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "@yxlimo/pi-wake@$version" version >/dev/null 2>&1; then
+            echo "$version is already on npm, skipping the upload" \
+              "so a re-run can finish the release"
+          else
+            if [ -n "${NPM_TOKEN:-}" ]; then
+              printf '%s\n' "//registry.npmjs.org/:_authToken=$NPM_TOKEN" \
+                > "$HOME/.npmrc"
+              echo "authenticating with NPM_TOKEN"
+            else
+              echo "no NPM_TOKEN, relying on trusted publishing (OIDC)"
+            fi
+            npm publish --provenance --access public
+          fi
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi
