@@ -1,7 +1,7 @@
 {
   "name": "@yxlimo/pi-wake",
   "version": "0.1.1",
-  "description": "Schedule a self wake-up: pi ends the turn and starts a new one at the chosen time",
+  "description": "Let the assistant wake itself up at a chosen time, or when a command it started exits",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,12 @@
     "pi-extension",
     "scheduler",
     "timer",
-    "reminder"
+    "reminder",
+    "cron",
+    "schedule",
+    "background",
+    "automation",
+    "interval"
   ],
   "pi": {
     "extensions": [

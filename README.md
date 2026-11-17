@@ -1,6 +1,6 @@
 # pi-wake
 
-Let the assistant wake itself up at a chosen time.
+Let the assistant wake itself up at a chosen time, or when a command it started exits.
 
 The assistant schedules a wake-up, ends its turn, and pi starts a new turn when
 the time comes — with a reminder of what it meant to do next. Nothing needs to be
