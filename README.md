@@ -37,12 +37,6 @@ session only:
 pi -e <clone>/packages/pi-plugin/src/index.ts
 ```
 
-For a subagent, declare it in the agent frontmatter:
-
-```yaml
-subagentOnlyExtensions: <clone>/packages/pi-plugin/src/index.ts
-```
-
 ## Tool reference
 
 `wake_up` takes one `action`:
@@ -74,7 +68,7 @@ the usual way to ask for "wake me only when this actually changed"; `whenTimeout
 
 **Wait.** `wait` replaces the clock: the command starts now and the wake-up fires
 when it exits 0 — `wake_up({ action: "schedule", wait: "gh watch pr 42 --exit",
-prompt: "PR 有动静了：看输出" })`. There is no interval and no deadline, so it
+prompt: "the PR moved: read the output" })`. There is no interval and no deadline, so it
 cannot be combined with `at`, `after`, `every` or `when`. A non-zero exit wakes
 nothing: the wake-up is dropped and reported once with the exit code and the tail
 of stderr. The process is killed on `cancel` and when the session ends, and a

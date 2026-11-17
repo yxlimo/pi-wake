@@ -22,11 +22,11 @@ on something you could just check synchronously.
 ## Scheduling
 
 ```text
-wake_up({ action: "schedule", after: "90m", prompt: "继续跑 typecheck" })
-wake_up({ action: "schedule", at: "2026-11-12T09:30:00+08:00", prompt: "看 CI 跑完没" })
-wake_up({ action: "schedule", after: "8s", prompt: "读 /tmp/build.log 最后 50 行，失败就修" })
-wake_up({ action: "schedule", every: "5m", prompt: "查 PR 的 review 与 CI，有要求就改" })
-wake_up({ action: "schedule", wait: "gh watch pr 42 --exit", prompt: "PR 有动静了：看输出" })
+wake_up({ action: "schedule", after: "90m", prompt: "re-run the typecheck" })
+wake_up({ action: "schedule", at: "2026-11-12T09:30:00+08:00", prompt: "check whether CI finished" })
+wake_up({ action: "schedule", after: "8s", prompt: "read the last 50 lines of /tmp/build.log and fix what failed" })
+wake_up({ action: "schedule", every: "5m", prompt: "check the PR reviews and CI, act on anything asked" })
+wake_up({ action: "schedule", wait: "gh watch pr 42 --exit", prompt: "the PR moved: read the output" })
 ```
 
 Give `at`, `after`, or `every` — at most one of `at` and `after`:
@@ -38,8 +38,8 @@ Give `at`, `after`, or `every` — at most one of `at` and `after`:
 | `every` | `5m`, `1h` | repeats at that interval until cancelled. Minimum `1s`. Cannot be combined with `at`; with `after`, `after` is only the first delay, and alone it starts one interval out. |
 
 Translate what the user said into one of these forms instead of computing
-clock arithmetic: "明早九点" becomes `at`, "过一会儿" becomes `after`, "每五分钟
-看一眼" becomes `every`. The result reports the resolved absolute time, the
+clock arithmetic: "tomorrow at nine" becomes `at`, "in a bit" becomes `after`,
+"every five minutes" becomes `every`. The result reports the resolved absolute time, the
 remaining delay, and the interval when it repeats, so check those before telling
 the user anything.
 
@@ -57,7 +57,7 @@ wake_up({
   every: "5m",
   when: "gh pr view 42 --repo owner/repo --json state,updatedAt",
   whenChanged: true,
-  prompt: "PR 有动静了：看 review 意见，有要求修改就改",
+  prompt: "the PR moved: read the reviews and make the changes they ask for",
 })
 ```
 
@@ -93,7 +93,8 @@ exits 0:
 wake_up({
   action: "schedule",
   wait: "gh watch pr 42 --repo owner/repo --interval 20s --exit-on ci-failed,ci-passed,review-submitted,comment-added --exit",
-  prompt: "PR 有动静了：读上面的输出，该改的改，该回的回",
+  prompt: "the PR moved: read the output above, make the changes it calls for,
+  and reply where needed",
 })
 ```
 
@@ -175,8 +176,9 @@ printf '%s\n' "$now"
 `prompt` is the instruction the waking turn gives itself. The waking turn keeps
 the whole conversation, so write the *next action*, not a recap:
 
-- good: `看 CI 跑完没，失败就修` / `reply with WAKE-OK` / `读 /tmp/build.log 末尾 50 行`
-- useless: `继续之前的工作` / `keep going`
+- good: `check whether CI finished, fix what failed` / `reply with WAKE-OK` /
+  `read the last 50 lines of /tmp/build.log`
+- useless: `keep working on the previous thing` / `keep going`
 
 Include the concrete artifact (a URL, a path, a command) when the waking turn
 would otherwise have to rediscover it.
