@@ -44,8 +44,10 @@ pi -e <clone>/packages/pi-plugin/src/index.ts
 | action | fields | effect |
 | --- | --- | --- |
 | `schedule` | `at`, `after` or `every`, or `wait`; plus `prompt`; optional `when` gate | arm a wake-up, returns its `id`; `every` repeats until cancelled; `wait` fires when its command exits |
-| `list` | — | pending wake-ups, nearest first, with the time left |
+| `list` | — | pending wake-ups, nearest first, with the time left (a `wait` entry shows how long it has been waiting) |
 | `cancel` | `id`, or `all: true` | drop one or all pending wake-ups |
+
+The same list is available to a human as the `/wake` command.
 
 **Time.** `at` is an absolute time in ISO 8601 (`2026-11-12T09:30:00+08:00`). An
 offset wins; without one the local time zone is used. A bare date
@@ -98,6 +100,7 @@ A `wait` wake-up says the command finished rather than naming a time:
 ⏰ Wait command finished · 2026-11-12 09:30:00 (Asia/Shanghai)
 
 This is a conditional wake-up, not the user speaking. The command you were waiting on exited with status 0.
+The instruction you left for yourself: the PR moved — read the output above
 Condition output at wake time:
 ```
 ci-failed  A required check has failed
@@ -107,7 +110,8 @@ ci-failed  A required check has failed
 The message is injected as an extension message, marked as an automatic wake-up
 so the model does not mistake it for the user speaking. It starts a new turn when
 pi is idle; if a turn is still running at that moment, it is queued as a
-follow-up instead of interrupting.
+follow-up instead of interrupting. The stamp is rendered in the local zone and
+locale, so the separators vary by machine.
 
 ## Skill
 
@@ -144,8 +148,9 @@ Loading the extension is the only requirement; `files` in `package.json` include
   Only `cancel` stops it.
 - **Subagents get no `wake_up`.** A background child runs with
   `PI_SUBAGENT_CHILD=1` and loads ambient extensions, so a global install reaches
-  it too; the extension then registers nothing, because a wake scheduled inside a
-  child would start a turn in a run that is already ending.
+  it too; there the extension registers no tool and no `/wake` command, because a
+  wake scheduled inside a child would start a turn in a run that is already
+  ending.
 - **One process at a time.** Two pi sessions on the same session file would each
   arm their own timer; nothing coordinates them.
 
@@ -181,8 +186,9 @@ is skipped, so re-running a half-finished workflow is safe.
 
 Authentication is one of:
 
-- **Trusted publishing** (preferred, nothing stored in this repository): on
+- **Trusted publishing** (recommended, nothing stored in this repository): on
   npmjs.com open the package, then Settings → Trusted publishing → GitHub
   Actions, with repository `yxlimo/pi-wake` and workflow `publish.yml`.
 - **`NPM_TOKEN`**: a granular access token with "bypass 2FA", saved as a
-  repository secret. Needed only when trusted publishing is unavailable.
+  repository secret. The workflow uses the secret whenever it is set, so add it
+  only if trusted publishing is unavailable.

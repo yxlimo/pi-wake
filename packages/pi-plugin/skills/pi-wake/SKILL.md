@@ -138,9 +138,11 @@ that ran for hours says what it found last). So print a short conclusion, not a
 log: no `cat` of whole JSON, no progress chatter, and never anything secret —
 that text lands in the transcript and in the model's context.
 
-**stderr is invisible.** It is not part of the evidence; only `wait` failures
-quote its tail in a notification. If the failure itself is what the waking turn
-must see, print it to stdout and `exit 0`.
+**stderr is invisible.** It is not part of the evidence, and only the tail of it
+is quoted in a notification when a `wait` command ends without waking. A one-shot
+`when` that exits non-zero quotes the first 200 characters of its stderr in the
+single "condition not met" notification, so it is not private either. If the
+failure itself is what the waking turn must see, print it to stdout and `exit 0`.
 
 **With `whenChanged`, stdout is a fingerprint.** The rule is "different from the
 run that last fired", so the same world must produce byte-identical output. A
@@ -149,8 +151,8 @@ completely and wakes you every slot. Also avoid empty output: the baseline start
 as `""`, so an empty string counts as unchanged and never wakes.
 
 **`whenTimeout` is a deadline, not a duration.** Default 30s, maximum 300s. The
-command is killed when it expires, and a timeout is reported once as a broken
-condition. So `when` must return quickly — never poll or sleep inside it. `wait`
+command is killed when it expires, and a timeout is reported once per pi run as a
+broken condition. So `when` must return quickly — never poll or sleep inside it. `wait`
 is the form to use when the command legitimately runs long.
 
 **It is `/bin/sh`, not your shell.** `whenLang: "sh"` means POSIX; zsh and fish
@@ -209,6 +211,9 @@ It arrives as an extension message, not a user message, and is queued as a
 follow-up: if a turn is still running it waits for that turn to finish rather
 than interrupting it. When the session is idle it starts a new run.
 
+The time is rendered in the local zone and locale, so the separators vary by
+machine.
+
 ## Seeing and cancelling
 
 ```text
@@ -235,8 +240,6 @@ Humans can list the same thing with the `/wake` command.
   process: no deadline, but also no survival. Closing pi kills it, and reopening
   the session starts it again.
 - **Only the main session has this tool.** Background subagents load the
-  extension with `PI_SUBAGENT_CHILD=1` and get no `wake_up`; a subagent that
-  needs a later check reports it to the parent instead.
-- **Do not promise background work.** A scheduled wake-up is not a background
-  job: tell the user the wake-up time, and say the work happens when pi is open
-  at that time.
+  extension with `PI_SUBAGENT_CHILD=1` and get no `wake_up`.
+- **A wake-up is not a background job.** It only fires while pi is running at
+  that time.
