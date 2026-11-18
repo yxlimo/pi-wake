@@ -1,7 +1,7 @@
 ---
 name: review
 description: Read-only reviewer for pi-wake that can run the suite and write one report file
-acceptanceRole: analyst
+acceptanceRole: read-only
 thinking: high
 inheritSkills: false
 inheritProjectContext: true
