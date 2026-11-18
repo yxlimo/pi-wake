@@ -167,7 +167,11 @@
         "systemctl --user stop",
         "systemctl --user enable",
         "systemctl --user disable",
-        "systemctl --user daemon-reload"
+        "systemctl --user daemon-reload",
+        "herdr --session",
+        "herdr agent start",
+        "herdr pane",
+        "re:^/nix/store/[^ ]+/bin/pi( .*)?$"
       ],
       "deny": [
         "git commit",
@@ -181,7 +185,7 @@
         "rm -rf"
       ],
       "writable": true,
-      "network": false
+      "network": true
     }
   }
 }
