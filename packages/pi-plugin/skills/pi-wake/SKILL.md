@@ -1,6 +1,6 @@
 ---
 name: pi-wake
-description: Use when work has to resume on its own later or when something that finishes on its own must wake you — waiting for CI, a build, a deploy, a rate limit, a PR watcher, or a user-requested reminder. Covers the wake_up tool (action schedule / list / cancel), the time forms (absolute `at` in ISO 8601, relative `after` like 90m, repeating `every` like 5m), `wait` for a command that decides when it is done, how to write the `when`/`wait` command, what the waking turn receives, and the limits (pi must stay running).
+description: Use when work has to resume on its own later or when something that finishes on its own must wake you — waiting for CI, a build, a deploy, a rate limit, a PR watcher, or a user-requested reminder. Covers the wake_up tool (action schedule / list / pause / resume / cancel), the time forms (absolute `at` in ISO 8601, relative `after` like 90m, repeating `every` like 5m), `wait` for a command that decides when it is done, how to write the `when`/`wait` command, what the waking turn receives, and the limits (pi must stay running).
 ---
 
 # pi-wake: waking yourself up later
@@ -111,8 +111,8 @@ judgement inside the command and express it through the exit status.
 - **Non-zero exit wakes nothing.** The wake-up is dropped and the user is told
   once with the exit code and the tail of stderr, because a watcher that failed
   will not fix itself by being ignored.
-- **Killed on `cancel` and when the session ends**, so a watcher cannot outlive
-  the session that asked for it.
+- **Killed on `cancel`, on `pause` and when the session ends**, so a watcher
+  cannot outlive the session that asked for it. `resume` starts it again.
 - **One shot.** After it fires, schedule again if you need to keep watching.
 - **Restarted on reopen.** A pending `wait` is persisted like any other wake-up,
   so reopening the session starts the command again.
@@ -214,14 +214,19 @@ than interrupting it. When the session is idle it starts a new run.
 The time is rendered in the local zone and locale, so the separators vary by
 machine.
 
-## Seeing and cancelling
+## Seeing, pausing and cancelling
 
 ```text
-wake_up({ action: "list" })                   // pending, nearest first, with time left
+wake_up({ action: "list" })                   // pending, nearest first, plus the last 5 firings
+wake_up({ action: "pause", id: "w1" })
+wake_up({ action: "resume", id: "w1" })
 wake_up({ action: "cancel", id: "w1" })
 wake_up({ action: "cancel", all: true })
 ```
 
+`list` keeps the last five firings next to the pending wake-ups: each row has the
+id, the time it fired, whether it was late, and a one-line summary of the output
+that woke it. It is the way to confirm that a wake-up did what it promised.
 Humans can list the same thing with the `/wake` command.
 
 ## Limits
@@ -232,10 +237,18 @@ Humans can list the same thing with the `/wake` command.
 - **Reopening a session restores pending wake-ups**, because the schedule is in
   the session file. One that came due while pi was closed fires on reopen, and
   the message says how late it is.
+- **A paused wake-up survives the reload too.** `pause` stops it firing without
+  dropping it, so the session file keeps the entry and it comes back paused;
+  `resume` arms it again. What resume does depends on the wake-up: a paused
+  `every` waits one full interval from the resume moment (missed slots are not
+  fired back to back), an overdue one-shot fires on resume because its
+  instruction was left for exactly that turn (and says it is late because it was
+  paused), and a one-shot still in the future keeps its time.
 - **Repeating wake-ups keep a fixed cadence and skip missed slots.** `every`
   re-arms itself after each firing; if pi was closed across several slots, the
   wake-up does not fire them back to back, it continues from the next slot. It
-  stays pending until `cancel`, so cancelling is the only way to stop it.
+  stays pending until `cancel`, so cancelling is the only way to stop it — or
+  `pause`, which holds it without dropping the entry until `resume` re-arms it.
 - **`wait` is not a background service.** It is one child process of the pi
   process: no deadline, but also no survival. Closing pi kills it, and reopening
   the session starts it again.

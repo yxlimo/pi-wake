@@ -553,4 +553,110 @@ console.log("pi-wake");
 	console.log("  ok   cancel 连同孙进程一起杀掉，不留孤儿 watcher");
 }
 
+
+// 31. A paused wake-up survives a reload and stays paused.
+{
+	const now = Date.now();
+	const entries = [
+		{ type: "custom", customType: "wake_up", data: { id: "w1", dueAt: now + 60_000, prompt: "未来的" } },
+		{ type: "custom", customType: "wake_up", data: { id: "w2", dueAt: now - 30_000, prompt: "暂停中的" } },
+		{ type: "custom", customType: "wake_up", data: { id: "w2", dueAt: now - 30_000, prompt: "暂停中的", paused: true } },
+		{ type: "custom", customType: "wake_up", data: { id: "w3", dueAt: now + 5_000, prompt: "暂停的后续", paused: true } },
+	];
+	const { tools, sent } = await boot({ entries });
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.equal(list.details.count, 3, "a paused wake-up is restored instead of dropped");
+	const rows = textOf(list).split("\n");
+	assert.match(rows[0], /w2.*paused/, "the paused wake-up comes first and is marked paused");
+	assert.match(rows[1], /w3.*paused/, "every paused wake-up is restored paused");
+	assert.match(rows[2], /w1/, "the live wake-up is still pending");
+	assert.doesNotMatch(rows[2], /paused/, "and it is not marked paused");
+
+	await sleep(150);
+	assert.equal(sent.length, 0, "the paused, overdue w2 does not fire on reopen");
+	console.log("  ok   暂停状态跨会话保留：重开后仍显示 paused 且不补发");
+}
+// 32. A paused wake-up keeps its entry but never fires.
+{
+	const { tools, sent, entries } = await boot();
+	const scheduled = await run(tools.wake_up, { action: "schedule", after: "80ms", prompt: "暂停的" });
+	const id = scheduled.details.id;
+	const paused = await run(tools.wake_up, { action: "pause", id });
+	assert.equal(paused.isError, undefined, textOf(paused));
+	assert.match(textOf(paused), /Paused w1/, "the reply names the wake-up");
+	assert.equal(entries.at(-1).data.paused, true, "the pause is written to the session");
+
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.match(textOf(list), /paused/, "the paused wake-up is listed as paused");
+	assert.equal(list.details.count, 1, "it keeps its entry");
+
+	await sleep(200);
+	assert.equal(sent.length, 0, "a paused wake-up does not fire");
+	console.log("  ok   暂停后不再触发，list 标出 paused，暂停状态写进会话");
+}
+
+// 33. Resuming fires per the documented semantics: an overdue one-shot wakes now.
+{
+	const now = Date.now();
+	const { tools, sent } = await boot({
+		entries: [
+			{ type: "custom", customType: "wake_up", data: { id: "w2", dueAt: now - 120_000, prompt: "恢复后立刻继续", paused: true } },
+		],
+	});
+	await sleep(50);
+	assert.equal(sent.length, 0, "a paused entry restored from the session stays silent");
+
+	const resumed = await run(tools.wake_up, { action: "resume", id: "w2" });
+	assert.equal(resumed.isError, undefined, textOf(resumed));
+	assert.match(textOf(resumed), /wakes you now/, "the reply says it fires immediately");
+	await sleep(50);
+	assert.equal(sent.length, 1, "a one-shot whose time passed while paused fires on resume");
+	assert.match(sent[0].message.content, /恢复后立刻继续/u, "the instruction is carried over");
+	assert.match(sent[0].message.content, /the wake-up was paused/u, "the reminder says why it is late");
+
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.match(textOf(list), /late/u, "the recent-fires row says it fired late");
+	console.log("  ok   恢复一次过期的一次性唤醒：立刻触发并说明只因暂停而迟到");
+}
+
+// 34. Resuming a paused `every` re-arms one full interval from the resume moment.
+{
+	const { tools, sent } = await boot();
+	const scheduled = await run(tools.wake_up, { action: "schedule", every: "1s", prompt: "周期性恢复" });
+	const id = scheduled.details.id;
+	await run(tools.wake_up, { action: "pause", id });
+	await sleep(1_300);
+	assert.equal(sent.length, 0, "the slot that passed while paused is not fired");
+
+	const resumed = await run(tools.wake_up, { action: "resume", id });
+	assert.equal(resumed.isError, undefined, textOf(resumed));
+	await sleep(600);
+	assert.equal(sent.length, 0, "the missed slot is not fired back to back");
+	await sleep(800);
+	assert.equal(sent.length, 1, "it fires one interval after the resume");
+	assert.match(sent[0].message.content, /Repeats every/u, "it is still repeating");
+	console.log("  ok   恢复 every：下一槽从恢复那一刻重新计算，不补发错过的槽");
+}
+
+// 35. `list` keeps only the five most recent firings, newest first.
+{
+	const { tools } = await boot();
+	for (let index = 1; index <= 7; index += 1) {
+		// Staggered on purpose: the history keeps push order, and `when` gates
+		// finish in their own time, so simultaneous slots would make the cap flaky.
+		await run(tools.wake_up, { action: "schedule", after: `${index * 200}ms`, when: `echo run-${index}`, prompt: `第 ${index} 次` });
+	}
+	await sleep(1_900);
+	const list = await run(tools.wake_up, { action: "list" });
+	const text = textOf(list);
+	const rows = text.split("\n").filter((line) => /fired/.test(line));
+	assert.equal(rows.length, 5, "only the five most recent firings are kept");
+	assert.match(rows[0], /w7/, "the newest firing comes first");
+	assert.match(rows[4], /w3/, "the oldest kept firing is the fifth newest");
+	assert.doesNotMatch(text, /w1: fired|w2: fired/, "the older firings fell out of the cap");
+	assert.match(rows[0], /run-7/, "the row carries the condition output as evidence");
+	assert.match(rows[0], /\(on time\)/, "a timely firing says so");
+	console.log("  ok   list 只保留最近 5 条触发记录，最新的在前，并带证据摘要");
+}
+
 console.log("\npi-wake 测试通过");

@@ -12,6 +12,8 @@
  *   wake_up({ action: "schedule", at: "2026-11-12T09:30:00+08:00" })
  *   wake_up({ action: "schedule", wait: "gh watch pr 42 --exit", prompt: "看 PR 变化" })
  *   wake_up({ action: "list" })
+ *   wake_up({ action: "pause", id: "w1" })
+ *   wake_up({ action: "resume", id: "w1" })
  *   wake_up({ action: "cancel", id: "w1" })
  *   wake_up({ action: "cancel", all: true })
  *
@@ -63,11 +65,15 @@ const MAX_CONDITION_TIMEOUT_MS = 300_000;
 const MAX_CONDITION_BYTES = 64 * 1024;
 /** How much of that output travels into the reminder. */
 const MAX_EVIDENCE_CHARS = 4_000;
+/** How much later than its slot a firing still counts as on time. */
+const LATE_TOLERANCE_MS = 5_000;
+/** How many fired records `list` keeps. */
+const HISTORY_LIMIT = 5;
 
 const wakeUpSchema = Type.Object(
 	{
-		action: Type.Union([Type.Literal("schedule"), Type.Literal("list"), Type.Literal("cancel")], {
-			description: "schedule a wake-up, list pending ones, or cancel one",
+		action: Type.Union([Type.Literal("schedule"), Type.Literal("list"), Type.Literal("pause"), Type.Literal("resume"), Type.Literal("cancel")], {
+			description: "schedule a wake-up, list pending and recent ones, pause or resume one, or cancel one",
 		}),
 		at: Type.Optional(
 			Type.String({
@@ -124,7 +130,7 @@ const wakeUpSchema = Type.Object(
 					"What to tell your future self when the wake-up fires. Write the next action, not a restatement of the task.",
 			}),
 		),
-		id: Type.Optional(Type.String({ description: "Cancel this id instead of all wake-ups." })),
+		id: Type.Optional(Type.String({ description: "Pause, resume or cancel this id instead of all wake-ups." })),
 		all: Type.Optional(Type.Boolean({ description: "With action cancel: drop every pending wake-up." })),
 	},
 	{ additionalProperties: false },
@@ -173,6 +179,8 @@ type Wake = {
 	lastStdout?: string;
 	/** Set once a broken condition has been reported, so it is reported once. */
 	reportedBroken?: boolean;
+	/** Set while paused: the wake-up keeps its entry but never fires. */
+	paused?: boolean;
 	/** Pending timer, cleared when the wake-up fires or is cancelled. */
 	timer?: ReturnType<typeof setTimeout>;
 };
@@ -190,14 +198,28 @@ type WakeEntry = {
 	wait?: string;
 	waitLang?: "sh" | "node";
 	lastStdout?: string;
+	paused?: boolean;
 	skippedAt?: number;
 	firedAt?: number;
 	cancelledAt?: number;
 };
 
+/** One remembered firing, shown under the pending wake-ups in `list`. */
+type FireRecord = {
+	id: string;
+	/** When the wake-up actually fired, epoch ms. */
+	firedAt: number;
+	/** How far past its slot it fired; 0 for a `wait` wake-up. */
+	lateMs: number;
+	/** One line kept from the firing output, or empty when there was none. */
+	evidence: string;
+};
+
 export default function (pi: ExtensionAPI) {
 	/** Pending wake-ups for this session, keyed by id. */
 	const wakes = new Map<string, Wake>();
+	/** Recent firings, newest last; `list` shows the last few so a wake-up can be verified. */
+	const fired: FireRecord[] = [];
 	/** Set on session_start; used for notifications and idle checks when firing. */
 	let sessionCtx: ExtensionContext | undefined;
 	/** Monotonic suffix for new ids, restored from the session so ids stay unique. */
@@ -280,6 +302,15 @@ export default function (pi: ExtensionAPI) {
 		return parts.filter(Boolean).join("");
 	}
 
+	/** One line from the firing output: the conclusion, short enough for a list row. */
+	function summarizeFire(evidence: string, tail: boolean): string {
+		const lines = evidence
+			.split("\n")
+			.map((line) => line.trim())
+			.filter(Boolean);
+		return (tail ? lines.at(-1) : lines[0])?.slice(0, 100) ?? "";
+	}
+
 	/* ---------------------------------------------------------------- scheduling */
 
 	/**
@@ -321,6 +352,7 @@ export default function (pi: ExtensionAPI) {
 			...(wake.wait ? { wait: wake.wait } : {}),
 			...(wake.waitLang === "node" ? { waitLang: "node" as const } : {}),
 			...(wake.lastStdout !== undefined ? { lastStdout: wake.lastStdout } : {}),
+			...(wake.paused ? { paused: true } : {}),
 		};
 	}
 
@@ -452,8 +484,8 @@ export default function (pi: ExtensionAPI) {
 			if (settled) return;
 			settled = true;
 			wake.child = undefined;
-			// A cancel or a restart already took this wake-up away; say nothing.
-			if (wakes.get(wake.id) !== wake) return;
+			// A cancel, a pause or a restart already took this wake-up away; say nothing.
+			if (wakes.get(wake.id) !== wake || wake.paused) return;
 			if ("error" in summary) {
 				dropWait(wake, summary.error, text(err));
 				return;
@@ -505,7 +537,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Start the waking turn; a repeating wake-up re-arms itself for its next slot. */
-	async function fire(id: string, waitOutput?: string) {
+	async function fire(id: string, waitOutput?: string, lateNote = "pi was not running") {
 		const wake = wakes.get(id);
 		if (!wake) return;
 
@@ -517,8 +549,8 @@ export default function (pi: ExtensionAPI) {
 			wake.lastStdout = waitOutput ?? "";
 		} else if (wake.when) {
 			const outcome = await evaluateCondition(wake);
-			// The wake-up may have been cancelled while the condition ran.
-			if (wakes.get(id) !== wake) return;
+			// The wake-up may have been cancelled or paused while the condition ran.
+			if (wakes.get(id) !== wake || wake.paused) return;
 			if (outcome.broken && !wake.reportedBroken) {
 				wake.reportedBroken = true;
 				sessionCtx?.ui?.notify(`pi-wake: ${wake.id}: the when condition could not run: ${outcome.broken}`, "warning");
@@ -553,6 +585,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const late = firedAt - firedSlot;
+		// Remember the firing for `list`: keep the newest and drop the older ones.
+		fired.push({ id: wake.id, firedAt, lateMs: wake.wait ? 0 : late, evidence: summarizeFire(evidence, Boolean(wake.wait)) });
+		if (fired.length > HISTORY_LIMIT) fired.shift();
 		const lines = wake.wait
 			? [
 					`⏰ Wait command finished · ${formatLocal(firedAt)}`,
@@ -564,8 +599,8 @@ export default function (pi: ExtensionAPI) {
 					"",
 					"This is a scheduled wake-up, not the user speaking. The time has come; carry on with the work.",
 				];
-		if (!wake.wait && late > 5_000) {
-			lines.push(`(Fired ${formatSpan(late)} late — pi was not running.)`);
+		if (!wake.wait && late > LATE_TOLERANCE_MS) {
+			lines.push(`(Fired ${formatSpan(late)} late — ${lateNote}.)`);
 		}
 		lines.push(
 			wake.prompt.trim()
@@ -591,6 +626,11 @@ export default function (pi: ExtensionAPI) {
 	/** Human-readable summary of one pending wake-up. */
 	function describe(wake: Wake): string {
 		const prompt = wake.prompt.trim() ? ` — "${wake.prompt.trim()}"` : "";
+		if (wake.paused) {
+			const stopped = wake.wait ? "the watch command is stopped" : `was due ${formatLocal(wake.dueAt)}`;
+			const cadence = wake.intervalMs ? `, resumes one ${formatSpan(wake.intervalMs)} from the resume` : "";
+			return `${wake.id}: paused (${stopped}${cadence})${prompt}`;
+		}
 		if (wake.wait) {
 			return `${wake.id}: waiting for the command to exit (${formatSpan(Date.now() - wake.armedAt)} elapsed)${prompt}`;
 		}
@@ -602,6 +642,23 @@ export default function (pi: ExtensionAPI) {
 
 	function pending(): Wake[] {
 		return [...wakes.values()].sort((a, b) => a.dueAt - b.dueAt);
+	}
+
+	/** One row of the fired-history section. */
+	function describeFire(record: FireRecord): string {
+		const late = record.lateMs > LATE_TOLERANCE_MS ? `${formatSpan(record.lateMs)} late` : "on time";
+		const evidence = record.evidence ? ` — ${record.evidence}` : "";
+		return `- ${record.id}: fired ${formatLocal(record.firedAt)} (${late})${evidence}`;
+	}
+
+	/** Body shared by `list` and `/wake`: pending wake-ups, then the last few firings. */
+	function listText(): { text: string; count: number } {
+		const list = pending();
+		const lines = list.length ? list.map((wake) => `- ${describe(wake)}`) : ["No pending wake-ups."];
+		if (fired.length) {
+			lines.push("", `Fired recently (last ${fired.length}, newest first):`, ...[...fired].reverse().map(describeFire));
+		}
+		return { text: lines.join("\n"), count: list.length };
 	}
 
 	/** Build a result with the shared details shape. */
@@ -648,8 +705,12 @@ export default function (pi: ExtensionAPI) {
 				...(data.whenChanged ? { whenChanged: true } : {}),
 				...(Number(data.whenTimeoutMs) > 0 ? { whenTimeoutMs: Number(data.whenTimeoutMs) } : {}),
 				...(typeof data.lastStdout === "string" ? { lastStdout: data.lastStdout } : {}),
+				...(data.paused === true ? { paused: true } : {}),
 			};
 			wakes.set(wake.id, wake);
+			// A paused wake-up is restored paused: it keeps its entry so `list` can
+			// show it and `resume` can arm it again, but nothing is armed now.
+			if (wake.paused) continue;
 			if (wake.wait) startWait(wake);
 			else arm(wake);
 		}
@@ -690,11 +751,59 @@ export default function (pi: ExtensionAPI) {
 			const action = params.action;
 
 			if (action === "list") {
-				const list = pending();
-				const text = list.length
-					? list.map((wake) => `- ${describe(wake)}`).join("\n")
-					: "No pending wake-ups.";
-				return reply(text, { count: list.length });
+				const { text, count } = listText();
+				return reply(text, { count });
+			}
+
+			if (action === "pause" || action === "resume") {
+				const id = params.id?.trim();
+				if (!id) return reply(`${action} needs an id.`, {}, true);
+				const wake = wakes.get(id);
+				if (!wake) {
+					const known = pending().map((item) => item.id);
+					return reply(
+						`No wake-up with id "${id}". ${known.length ? `Known: ${known.join(", ")}` : "There are no wake-ups to pause or resume."}`,
+						{},
+						true,
+					);
+				}
+				if (action === "pause") {
+					if (wake.paused) return reply(`${id} is already paused.`, {});
+					if (wake.timer) clearTimeout(wake.timer);
+					wake.timer = undefined;
+					// A paused wake-up never fires, so the watch command it started
+					// has nobody to wake: keep the entry, stop the process.
+					if (wake.wait) killWaitChild(wake);
+					wake.paused = true;
+					record(baseEntry(wake));
+					return reply(`Paused ${id}: it keeps its schedule but will not fire until resumed.`, {});
+				}
+				if (!wake.paused) return reply(`${id} is not paused.`, {});
+				wake.paused = false;
+				if (wake.wait) {
+					record(baseEntry(wake));
+					startWait(wake);
+					return reply(`Resumed ${id}: the watch command is running again.`, {});
+				}
+				const now = Date.now();
+				if (wake.intervalMs) {
+					// The pause ate whole slots. Firing them back to back is what a
+					// reopened session avoids, so the next slot is one interval from
+					// the moment of resume instead of from the slot that was missed.
+					wake.dueAt = now + wake.intervalMs;
+					arm(wake);
+					record(baseEntry(wake));
+					return reply(`Resumed ${id}: next firing ${formatLocal(wake.dueAt)}, one ${formatSpan(wake.intervalMs)} from now.`, {});
+				}
+				if (wake.dueAt <= now) {
+					// Its time came while it was paused. The instruction was left for
+					// exactly this turn, so it fires now and says why it is late.
+					void fire(wake.id, undefined, "the wake-up was paused");
+					return reply(`Resumed ${id}: its time passed while paused, so it wakes you now.`, {});
+				}
+				arm(wake);
+				record(baseEntry(wake));
+				return reply(`Resumed ${id}: due ${formatLocal(wake.dueAt)}, in ${formatSpan(wake.dueAt - now)}.`, {});
 			}
 
 			if (action === "cancel") {
@@ -849,11 +958,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("wake", {
 		description: "List pending wake-ups (see the wake_up tool)",
 		handler: async (_args, ctx) => {
-			const list = pending();
-			const lines = list.length
-				? ["pi-wake:"].concat(list.map((wake) => `- ${describe(wake)}`))
-				: ["pi-wake: no pending wake-ups."];
-			ctx.ui.notify(lines.join("\n"), "info");
+			const { text } = listText();
+			ctx.ui.notify(`pi-wake:\n${text}`, "info");
 		},
 	});
 }
