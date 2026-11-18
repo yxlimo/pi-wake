@@ -181,6 +181,15 @@ type Wake = {
 	reportedBroken?: boolean;
 	/** Set while paused: the wake-up keeps its entry but never fires. */
 	paused?: boolean;
+	/**
+	 * Attempt counter: bumped where an attempt in flight — a running `wait` child,
+	 * a `when` evaluation — has to be abandoned, and once per `resume`. An attempt
+	 * reads it when it starts and only touches the wake-up while it still matches.
+	 * "Still in the map and not paused" cannot tell a leftover from the live one:
+	 * `pause` kills the child, and `resume` clears `paused` on the same object, so
+	 * a killed child's late `close` and a stale condition result both pass it.
+	 */
+	generation: number;
 	/** Pending timer, cleared when the wake-up fires or is cancelled. */
 	timer?: ReturnType<typeof setTimeout>;
 };
@@ -325,7 +334,7 @@ export default function (pi: ExtensionAPI) {
 		if (remaining > MAX_TIMEOUT_MS) {
 			wake.timer = setTimeout(() => arm(wake), MAX_TIMEOUT_MS);
 		} else {
-			wake.timer = setTimeout(() => void fire(wake.id), Math.max(0, remaining));
+			wake.timer = setTimeout(() => fireInBackground(wake.id), Math.max(0, remaining));
 		}
 		// Never hold the process open: in a one-shot run pi should still exit when
 		// the turn is done instead of waiting for a wake-up that cannot be used.
@@ -477,21 +486,32 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		wake.child = child;
+		// Every child is its own attempt: `resume` starts another one, so a child
+		// that `pause` killed and that reports its `close` only now no longer
+		// speaks for the wake-up.
+		const attempt = ++wake.generation;
 		child.stdout?.on("data", (chunk: Buffer) => collect(out, chunk));
 		child.stderr?.on("data", (chunk: Buffer) => collect(err, chunk));
 		let settled = false;
 		const finish = (summary: { code: number | null; signal: NodeJS.Signals | null } | { error: string }) => {
 			if (settled) return;
 			settled = true;
-			wake.child = undefined;
-			// A cancel, a pause or a restart already took this wake-up away; say nothing.
+			// Let go of the handle only while it is still this child's: `resume` may
+			// have started the next one, and nulling that would leave the resumed
+			// watcher running with nothing left that could cancel it.
+			if (wake.child === child) wake.child = undefined;
+			// A pause (and a resume after it) turned this command into a leftover, and
+			// its `close` arrives once the wake-up is live again — `paused` is already
+			// false by then, so only the attempt counter can tell them apart.
+			if (attempt !== wake.generation) return;
+			// A cancel dropped it from the map; say nothing in that case.
 			if (wakes.get(wake.id) !== wake || wake.paused) return;
 			if ("error" in summary) {
 				dropWait(wake, summary.error, text(err));
 				return;
 			}
 			if (summary.code === 0) {
-				void fire(wake.id, text(out));
+				fireInBackground(wake.id, text(out));
 				return;
 			}
 			const why = summary.signal
@@ -548,9 +568,14 @@ export default function (pi: ExtensionAPI) {
 			evidence = (waitOutput ?? "").trim().slice(-MAX_EVIDENCE_CHARS);
 			wake.lastStdout = waitOutput ?? "";
 		} else if (wake.when) {
+			// The generation is the token for this attempt: a pause bumps it, and
+			// `resume` clears `paused` again, so without it a probe that resolves
+			// after a resume would burn a slot the user asked to hold (an extra
+			// reminder for `every`, with the cadence recounted from the resumed slot).
+			const attempt = wake.generation;
 			const outcome = await evaluateCondition(wake);
-			// The wake-up may have been cancelled or paused while the condition ran.
-			if (wakes.get(id) !== wake || wake.paused) return;
+			// Cancelled, paused or resumed while the condition ran: give up quietly.
+			if (attempt !== wake.generation || wakes.get(id) !== wake || wake.paused) return;
 			if (outcome.broken && !wake.reportedBroken) {
 				wake.reportedBroken = true;
 				sessionCtx?.ui?.notify(`pi-wake: ${wake.id}: the when condition could not run: ${outcome.broken}`, "warning");
@@ -623,6 +648,18 @@ export default function (pi: ExtensionAPI) {
 		sessionCtx?.ui?.notify(`pi-wake: wake ${wake.id} @ ${formatLocal(firedSlot)}`, "info");
 	}
 
+	/**
+	 * Fire from somewhere a rejection has nowhere to go — a timer callback, a
+	 * child's `close`, a tool result that has already been returned. A bare
+	 * promise would turn such a failure into an unhandled rejection nobody sees.
+	 */
+	function fireInBackground(id: string, waitOutput?: string, lateNote?: string) {
+		void fire(id, waitOutput, lateNote).catch((error: unknown) => {
+			const why = error instanceof Error ? error.message : String(error);
+			sessionCtx?.ui?.notify(`pi-wake: ${id}: the wake-up could not fire: ${why}`, "error");
+		});
+	}
+
 	/** Human-readable summary of one pending wake-up. */
 	function describe(wake: Wake): string {
 		const prompt = wake.prompt.trim() ? ` — "${wake.prompt.trim()}"` : "";
@@ -678,6 +715,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		sessionCtx = ctx;
 		wakes.clear();
+		// The fired history describes the session that is starting, not the one that
+		// just ended: /new must not show rows another conversation produced.
+		fired.length = 0;
 		for (const entry of ctx.sessionManager.getEntries()) {
 			if (entry.type !== "custom" || entry.customType !== ENTRY_TYPE) continue;
 			const data = entry.data as WakeEntry | undefined;
@@ -697,6 +737,7 @@ export default function (pi: ExtensionAPI) {
 				dueAt,
 				prompt: data.prompt ?? "",
 				armedAt: Number(data.armedAt) || dueAt,
+				generation: 0,
 				...(Number(data.intervalMs) > 0 ? { intervalMs: Number(data.intervalMs) } : {}),
 				...(data.when ? { when: data.when } : {}),
 				...(typeof data.wait === "string" && data.wait ? { wait: data.wait } : {}),
@@ -771,8 +812,15 @@ export default function (pi: ExtensionAPI) {
 					if (wake.paused) return reply(`${id} is already paused.`, {});
 					if (wake.timer) clearTimeout(wake.timer);
 					wake.timer = undefined;
+					// Everything in flight belongs to the previous attempt now: the
+					// killed child reports its `close` later — after a `resume` may have
+					// started the next one — and a `when` evaluation that resolves after
+					// the resume must not fire a slot the pause was asked to hold.
+					wake.generation += 1;
 					// A paused wake-up never fires, so the watch command it started
-					// has nobody to wake: keep the entry, stop the process.
+					// has nobody to wake: keep the entry, stop the process. An in-flight
+					// `when` child is not killed here — the generation check discards its
+					// result, and `whenTimeout` bounds how long it can run.
 					if (wake.wait) killWaitChild(wake);
 					wake.paused = true;
 					record(baseEntry(wake));
@@ -780,6 +828,9 @@ export default function (pi: ExtensionAPI) {
 				}
 				if (!wake.paused) return reply(`${id} is not paused.`, {});
 				wake.paused = false;
+				// The resumed wake-up is a new attempt: anything that read the counter
+				// before this point is stale from here on.
+				wake.generation += 1;
 				if (wake.wait) {
 					record(baseEntry(wake));
 					startWait(wake);
@@ -798,7 +849,7 @@ export default function (pi: ExtensionAPI) {
 				if (wake.dueAt <= now) {
 					// Its time came while it was paused. The instruction was left for
 					// exactly this turn, so it fires now and says why it is late.
-					void fire(wake.id, undefined, "the wake-up was paused");
+					fireInBackground(wake.id, undefined, "the wake-up was paused");
 					return reply(`Resumed ${id}: its time passed while paused, so it wakes you now.`, {});
 				}
 				arm(wake);
@@ -919,7 +970,7 @@ export default function (pi: ExtensionAPI) {
 			const waiting = wait
 				? { wait, ...(params.waitLang === "node" ? { waitLang: "node" as const } : {}) }
 				: {};
-			const wake: Wake = { id, dueAt, prompt: params.prompt ?? "", armedAt: now, ...(intervalMs ? { intervalMs } : {}), ...gate, ...waiting };
+			const wake: Wake = { id, dueAt, prompt: params.prompt ?? "", armedAt: now, generation: 0, ...(intervalMs ? { intervalMs } : {}), ...gate, ...waiting };
 			wakes.set(id, wake);
 			if (wake.wait) startWait(wake);
 			else arm(wake);

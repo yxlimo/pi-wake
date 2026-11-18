@@ -143,6 +143,7 @@ console.log("pi-wake");
 	const lines = textOf(result).split("\n");
 	assert.match(lines[0], /w2/, "the sooner wake-up comes first");
 	assert.match(lines[1], /w1/);
+	assert.doesNotMatch(textOf(result), /Fired recently/, "a plain pending list carries no firing history");
 	console.log("  ok   list 按时间排序列出待唤醒项");
 }
 
@@ -625,14 +626,18 @@ console.log("pi-wake");
 	const scheduled = await run(tools.wake_up, { action: "schedule", every: "1s", prompt: "周期性恢复" });
 	const id = scheduled.details.id;
 	await run(tools.wake_up, { action: "pause", id });
-	await sleep(1_300);
-	assert.equal(sent.length, 0, "the slot that passed while paused is not fired");
+	// Pause across two and a half intervals, so the slot the pause ate is far in
+	// the past by the time of the resume: a `dueAt` carried over from before the
+	// pause and one counted from the resume are then two separated slots, and the
+	// checkpoints below can tell them apart.
+	await sleep(2_500);
+	assert.equal(sent.length, 0, "the slots that passed while paused are not fired");
 
 	const resumed = await run(tools.wake_up, { action: "resume", id });
 	assert.equal(resumed.isError, undefined, textOf(resumed));
-	await sleep(600);
-	assert.equal(sent.length, 0, "the missed slot is not fired back to back");
-	await sleep(800);
+	await sleep(400);
+	assert.equal(sent.length, 0, "the next slot is a full interval after the resume, not a missed one");
+	await sleep(1_100);
 	assert.equal(sent.length, 1, "it fires one interval after the resume");
 	assert.match(sent[0].message.content, /Repeats every/u, "it is still repeating");
 	console.log("  ok   恢复 every：下一槽从恢复那一刻重新计算，不补发错过的槽");
@@ -657,6 +662,49 @@ console.log("pi-wake");
 	assert.match(rows[0], /run-7/, "the row carries the condition output as evidence");
 	assert.match(rows[0], /\(on time\)/, "a timely firing says so");
 	console.log("  ok   list 只保留最近 5 条触发记录，最新的在前，并带证据摘要");
+}
+
+// 36. A `wait` wake-up can be paused and resumed, and the child the pause killed
+// must not speak for it: that stale `close` arriving after the resume is what
+// used to drop the wake-up and report it ended without waking.
+{
+	const { tools, sent, notes } = await boot();
+	const marker = path.join(os.tmpdir(), `piwake-resume-${process.pid}-${Date.now()}.txt`);
+	// Shaped like a watcher that writes as it polls and has to be stopped on pause:
+	// on TERM it stops writing at once and exits non-zero a moment later, so its
+	// `close` lands after the resume — the only window where it can misfire.
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		wait: `trap 'sleep 1.2; exit 7' TERM; while true; do echo tick >> '${marker}'; sleep 0.05; done`,
+		prompt: "等 PR 更新",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	const id = result.details.id;
+	await sleep(300);
+	assert.ok(fs.statSync(marker).size > 0, "the watcher really runs");
+
+	const paused = await run(tools.wake_up, { action: "pause", id });
+	assert.equal(paused.isError, undefined, textOf(paused));
+	await sleep(250);
+	const stopped = fs.statSync(marker).size;
+	await sleep(350);
+	assert.equal(fs.statSync(marker).size, stopped, "the watch command stops writing while paused");
+
+	const resumed = await run(tools.wake_up, { action: "resume", id });
+	assert.equal(resumed.isError, undefined, textOf(resumed));
+	await sleep(1_300);
+	// The child signalled by the pause has closed by now; the resumed one still runs.
+	assert.ok(fs.statSync(marker).size > stopped, "the watch command runs again after resume");
+	assert.equal(sent.length, 0, "the resumed watcher has not woken anything yet");
+	assert.equal((await run(tools.wake_up, { action: "list" })).details.count, 1, "the wake-up is still waiting");
+	assert.ok(
+		!notes.some((note) => /ended without waking/u.test(note.message)),
+		"the child paused away does not report having ended without waking",
+	);
+
+	await run(tools.wake_up, { action: "cancel", all: true });
+	fs.rmSync(marker, { force: true });
+	console.log("  ok   pause/resume 后 watch 命令继续运行，被 pause 杀掉的旧子进程不会误报结束");
 }
 
 console.log("\npi-wake 测试通过");
