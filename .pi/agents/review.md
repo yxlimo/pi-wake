@@ -41,8 +41,10 @@ tool for that value, so a plain `pnpm test` dies on `Cannot read properties of u
 'execute')`. Drop the variable for the run:
 
 ```bash
-cd packages/pi-plugin && node --import 'data:text/javascript,delete process.env.PI_SUBAGENT_CHILD' test/extension.test.mjs    # the suite
-node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit   # typecheck
+# Two single commands, run from the repo root: this profile has no `cd` in its
+# allowlist and refuses `&&`, so a chained form fails before the suite starts.
+node --import 'data:text/javascript,delete process.env.PI_SUBAGENT_CHILD' packages/pi-plugin/test/extension.test.mjs
+node packages/pi-plugin/node_modules/typescript/bin/tsc -p packages/pi-plugin/tsconfig.json --noEmit
 ```
 
 Never probe the extension with `node --input-type=module -e '...import(...)'`: the module keeps

@@ -817,4 +817,36 @@ console.log("pi-wake");
 	console.log("  ok   暂停期间旧子进程退出不会被当成结束：仍 pending、仍 paused，resume 能重新启动命令");
 }
 
+// 40. A `when` evaluation can also resolve *inside* the pause, with no resume in
+// between. Case 37 resumes before the condition resolves, so it only exercises
+// the counter; this window is the one where `wake.paused` alone discards the
+// result, and the pause no longer bumps the counter, so nothing else covers it.
+{
+	const { tools, sent } = await boot();
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		every: "1s",
+		when: "sleep 1; echo gated",
+		prompt: "查 PR",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	const id = result.details.id;
+
+	// Slot one is at ~1s and starts a 1s condition; the pause lands inside that
+	// window and is never resumed, so the condition resolves while paused.
+	await sleep(1_300);
+	const paused = await run(tools.wake_up, { action: "pause", id });
+	assert.equal(paused.isError, undefined, textOf(paused));
+
+	// The condition started before the pause resolves here: no wake-up may follow.
+	await sleep(1_500);
+	assert.equal(sent.length, 0, "a condition that resolves inside the pause fires nothing");
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.equal(list.details.count, 1, "the paused wake-up is still pending");
+	assert.match(textOf(list), /paused/, "and it is still listed as paused");
+
+	await run(tools.wake_up, { action: "cancel", all: true });
+	console.log("  ok   暂停期间解析的 when 只被 paused 丢弃，不会补发唤醒");
+}
+
 console.log("\npi-wake 测试通过");

@@ -230,6 +230,11 @@ export default function (pi: ExtensionAPI) {
 	const wakes = new Map<string, Wake>();
 	/** Recent firings, newest last; `list` shows the last few so a wake-up can be verified. */
 	const fired: FireRecord[] = [];
+	/**
+	 * 每个被杀子进程的 SIGKILL 升级定时器。子进程一收尾就清掉：否则两秒后那条 SIGKILL
+	 * 可能打到已被 OS 回收、属于别人的进程组（`killWaitChild` 的 `-pid`）。
+	 */
+	const killTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
 	/** Set on session_start; used for notifications and idle checks when firing. */
 	let sessionCtx: ExtensionContext | undefined;
 	/** Monotonic suffix for new ids, restored from the session so ids stay unique. */
@@ -497,6 +502,13 @@ export default function (pi: ExtensionAPI) {
 		const finish = (summary: { code: number | null; signal: NodeJS.Signals | null } | { error: string }) => {
 			if (settled) return;
 			settled = true;
+			// 子进程已收尾：撤掉待发的那条 SIGKILL 升级。否则它会在两秒后打到一个
+			// 可能已被 OS 回收、属于别人的进程组（见 `killWaitChild`）。
+			const pendingKill = killTimers.get(child);
+			if (pendingKill) {
+				clearTimeout(pendingKill);
+				killTimers.delete(child);
+			}
 			// Let go of the handle only while it is still this child's: `resume` may
 			// have started the next one, and nulling that would leave the resumed
 			// watcher running with nothing left that could cancel it.
@@ -547,6 +559,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		signal("SIGTERM");
 		const escalate = setTimeout(() => {
+			killTimers.delete(child);
 			signal("SIGKILL");
 			// The handle is dead now: drop it while it is still this child's, so a
 			// cancelled or paused wake-up does not keep a pid around for a group the
@@ -554,6 +567,9 @@ export default function (pi: ExtensionAPI) {
 			if (wake.child === child) wake.child = undefined;
 		}, 2_000);
 		escalate.unref?.();
+		// 留下定时器的引用：`finish` 在子进程收尾时清掉它，否则这条 SIGKILL 可能在
+		// 两秒后打到一个已被 OS 回收、属于别人的进程组上。
+		killTimers.set(child, escalate);
 	}
 
 	/** Drop a `wait` wake-up that ended without waking, telling the user why once. */
@@ -568,9 +584,10 @@ export default function (pi: ExtensionAPI) {
 	async function fire(id: string, waitOutput?: string, lateNote = "pi was not running") {
 		const wake = wakes.get(id);
 		if (!wake) return;
-		// Same invariant as every other gate: a paused wake-up never starts a turn.
-		// The timer is cleared on pause, but a callback already queued — or a
-		// `wait` child exiting 0 in the same tick — would still arrive here.
+		// Unreachable as the callers stand — `pause` clears the timer, the `wait` branch
+		// and the replay path both gate on `paused` first, and `fire` runs synchronously
+		// to its first `await`. It is here so the invariant holds if a caller changes,
+		// and it is deliberately not claimed as load-bearing: no case can pin it.
 		if (wake.paused) return;
 
 		let evidence = "";
