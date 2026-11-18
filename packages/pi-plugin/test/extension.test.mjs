@@ -702,9 +702,151 @@ console.log("pi-wake");
 		"the child paused away does not report having ended without waking",
 	);
 
-	await run(tools.wake_up, { action: "cancel", all: true });
+	// The stale `close` above must not have forgotten which child is live: cancel
+	// has to reach the watcher the resume started, not nothing at all.
+	const cancelled = await run(tools.wake_up, { action: "cancel", all: true });
+	assert.equal(cancelled.isError, undefined, textOf(cancelled));
+	await sleep(300);
+	const settledAfterCancel = fs.statSync(marker).size;
+	await sleep(400);
+	assert.equal(fs.statSync(marker).size, settledAfterCancel, "cancel kills the watcher the resume started, not a handle the stale close dropped");
 	fs.rmSync(marker, { force: true });
 	console.log("  ok   pause/resume 后 watch 命令继续运行，被 pause 杀掉的旧子进程不会误报结束");
+}
+
+// 37. A `when` evaluation that started before a pause, and resolves after the
+// resume, must not fire the slot the pause was asked to hold. A `wait` child has
+// a `close` to be told apart by; a `when` evaluation has nothing but the counter
+// the resume bumps, so a stale one would wake an `every` wake-up early and
+// recount its cadence from the missed slot.
+{
+	const { tools, sent } = await boot();
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		every: "1s",
+		when: "sleep 1; echo gated",
+		prompt: "查 PR",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	const id = result.details.id;
+
+	// Slot one is at ~1s and starts a 1s condition, so the pause lands inside
+	// that window: the condition is still running when the pause is issued.
+	await sleep(1_300);
+	const paused = await run(tools.wake_up, { action: "pause", id });
+	assert.equal(paused.isError, undefined, textOf(paused));
+	await sleep(200);
+	const resumed = await run(tools.wake_up, { action: "resume", id });
+	assert.equal(resumed.isError, undefined, textOf(resumed));
+
+	// The pre-pause condition resolves here, ~0.5s after the resume: it belongs
+	// to the pause, so it wakes nothing. A stale attempt would send its reminder.
+	await sleep(800);
+	assert.equal(sent.length, 0, "a condition started before the pause does not fire after the resume");
+	assert.equal((await run(tools.wake_up, { action: "list" })).details.count, 1, "the repeating wake-up is still pending");
+
+	// The slot re-armed from the moment of resume still fires, once.
+	await sleep(1_600);
+	assert.equal(sent.length, 1, "the resumed slot fires once, on its own time");
+	assert.match(sent[0].message.content, /Repeats every/u, "it is still the repeating wake-up that fired");
+	await run(tools.wake_up, { action: "cancel", all: true });
+	console.log("  ok   pause 期间开始的 when 求值在 resume 后不补发旧槽，恢复后的槽照常唤醒一次");
+}
+
+// 38. A second `session_start` starts a fresh fired history: the rows belong to
+// the session that produced them, so /new does not inherit another's firings.
+{
+	const { tools, handlers, ctx } = await boot();
+	await run(tools.wake_up, { action: "schedule", after: "80ms", when: "echo done", prompt: "查 PR" });
+	await sleep(400);
+	const before = textOf(await run(tools.wake_up, { action: "list" }));
+	assert.match(before, /Fired recently/, "the firing is remembered before the session restarts");
+
+	for (const handler of handlers.session_start ?? []) await handler({ type: "session_start" }, ctx);
+	const after = textOf(await run(tools.wake_up, { action: "list" }));
+	assert.doesNotMatch(after, /Fired recently/, "a second session_start drops the fired history");
+	console.log("  ok   第二次 session_start 清空 fired 历史，新会话的 list 不带上一段会话的触发记录");
+}
+
+// 39. The stale `close` can also land while the pause still holds, not only after
+// a resume. In that window `wake.paused` alone stops it: a `wait` whose child
+// ignores SIGTERM long enough to die inside the pause stays pending, stays
+// paused, and is not reported as having ended without waking.
+{
+	const { tools, notes } = await boot();
+	const marker = path.join(os.tmpdir(), `piwake-pausedonly-${process.pid}-${Date.now()}.txt`);
+	// Same trap as case 36: on TERM the watcher stops writing at once and exits
+	// 1.2s later, so its `close` arrives while the wake-up is still paused.
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		wait: `trap 'sleep 1.2; exit 7' TERM; while true; do echo tick >> '${marker}'; sleep 0.05; done`,
+		prompt: "等 PR 更新",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	const id = result.details.id;
+	await sleep(300);
+	assert.ok(fs.statSync(marker).size > 0, "the watcher really runs");
+
+	const paused = await run(tools.wake_up, { action: "pause", id });
+	assert.equal(paused.isError, undefined, textOf(paused));
+
+	// Past the trap's 1.2s delay: the killed child has closed by now, and the
+	// pause is still in force.
+	await sleep(1_500);
+	const stopped = fs.statSync(marker).size;
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.equal(list.details.count, 1, "a paused wake-up whose child died is still pending");
+	assert.match(textOf(list), /paused/, "and it is still listed as paused");
+	assert.ok(
+		!notes.some((note) => /ended without waking/u.test(note.message)),
+		"a stale close inside the pause is not reported as an ending",
+	);
+
+	// The entry survived: resume starts the command again.
+	const resumed = await run(tools.wake_up, { action: "resume", id });
+	assert.equal(resumed.isError, undefined, textOf(resumed));
+	await sleep(300);
+	assert.ok(fs.statSync(marker).size > stopped, "resume starts the watch command again");
+
+	await run(tools.wake_up, { action: "cancel", all: true });
+	await sleep(300);
+	const settled = fs.statSync(marker).size;
+	await sleep(400);
+	assert.equal(fs.statSync(marker).size, settled, "cancel still reaps the restarted watcher");
+	fs.rmSync(marker, { force: true });
+	console.log("  ok   暂停期间旧子进程退出不会被当成结束：仍 pending、仍 paused，resume 能重新启动命令");
+}
+
+// 40. A `when` evaluation can also resolve *inside* the pause, with no resume in
+// between. Case 37 resumes before the condition resolves, so it only exercises
+// the counter; this window is the one where `wake.paused` alone discards the
+// result, and the pause no longer bumps the counter, so nothing else covers it.
+{
+	const { tools, sent } = await boot();
+	const result = await run(tools.wake_up, {
+		action: "schedule",
+		every: "1s",
+		when: "sleep 1; echo gated",
+		prompt: "查 PR",
+	});
+	assert.equal(result.isError, undefined, textOf(result));
+	const id = result.details.id;
+
+	// Slot one is at ~1s and starts a 1s condition; the pause lands inside that
+	// window and is never resumed, so the condition resolves while paused.
+	await sleep(1_300);
+	const paused = await run(tools.wake_up, { action: "pause", id });
+	assert.equal(paused.isError, undefined, textOf(paused));
+
+	// The condition started before the pause resolves here: no wake-up may follow.
+	await sleep(1_500);
+	assert.equal(sent.length, 0, "a condition that resolves inside the pause fires nothing");
+	const list = await run(tools.wake_up, { action: "list" });
+	assert.equal(list.details.count, 1, "the paused wake-up is still pending");
+	assert.match(textOf(list), /paused/, "and it is still listed as paused");
+
+	await run(tools.wake_up, { action: "cancel", all: true });
+	console.log("  ok   暂停期间解析的 when 只被 paused 丢弃，不会补发唤醒");
 }
 
 console.log("\npi-wake 测试通过");

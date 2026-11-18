@@ -182,12 +182,13 @@ type Wake = {
 	/** Set while paused: the wake-up keeps its entry but never fires. */
 	paused?: boolean;
 	/**
-	 * Attempt counter: bumped where an attempt in flight — a running `wait` child,
-	 * a `when` evaluation — has to be abandoned, and once per `resume`. An attempt
-	 * reads it when it starts and only touches the wake-up while it still matches.
-	 * "Still in the map and not paused" cannot tell a leftover from the live one:
-	 * `pause` kills the child, and `resume` clears `paused` on the same object, so
-	 * a killed child's late `close` and a stale condition result both pass it.
+	 * Attempt counter: bumped when a `wait` attempt starts and once per `resume`.
+	 * An attempt reads it when it starts and only touches the wake-up while it
+	 * still matches. During a bare pause `wake.paused` is the guard; after a
+	 * resume it is this counter, because "still in the map and not paused" cannot
+	 * tell a leftover from the live one: `resume` clears `paused` on the same
+	 * object, so a killed child's late `close` and a stale condition result both
+	 * pass it.
 	 */
 	generation: number;
 	/** Pending timer, cleared when the wake-up fires or is cancelled. */
@@ -229,6 +230,11 @@ export default function (pi: ExtensionAPI) {
 	const wakes = new Map<string, Wake>();
 	/** Recent firings, newest last; `list` shows the last few so a wake-up can be verified. */
 	const fired: FireRecord[] = [];
+	/**
+	 * 每个被杀子进程的 SIGKILL 升级定时器。子进程一收尾就清掉：否则两秒后那条 SIGKILL
+	 * 可能打到已被 OS 回收、属于别人的进程组（`killWaitChild` 的 `-pid`）。
+	 */
+	const killTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
 	/** Set on session_start; used for notifications and idle checks when firing. */
 	let sessionCtx: ExtensionContext | undefined;
 	/** Monotonic suffix for new ids, restored from the session so ids stay unique. */
@@ -496,13 +502,21 @@ export default function (pi: ExtensionAPI) {
 		const finish = (summary: { code: number | null; signal: NodeJS.Signals | null } | { error: string }) => {
 			if (settled) return;
 			settled = true;
+			// 子进程已收尾：撤掉待发的那条 SIGKILL 升级。否则它会在两秒后打到一个
+			// 可能已被 OS 回收、属于别人的进程组（见 `killWaitChild`）。
+			const pendingKill = killTimers.get(child);
+			if (pendingKill) {
+				clearTimeout(pendingKill);
+				killTimers.delete(child);
+			}
 			// Let go of the handle only while it is still this child's: `resume` may
 			// have started the next one, and nulling that would leave the resumed
 			// watcher running with nothing left that could cancel it.
 			if (wake.child === child) wake.child = undefined;
-			// A pause (and a resume after it) turned this command into a leftover, and
-			// its `close` arrives once the wake-up is live again — `paused` is already
-			// false by then, so only the attempt counter can tell them apart.
+			// A pause (and a resume after it) turned this command into a leftover. Its
+			// `close` lands in one of two windows: while the pause still holds, where
+			// `paused` stops it, or after a resume cleared `paused`, where only the
+			// attempt counter can tell the leftover from the live child.
 			if (attempt !== wake.generation) return;
 			// A cancel dropped it from the map; say nothing in that case.
 			if (wakes.get(wake.id) !== wake || wake.paused) return;
@@ -544,8 +558,18 @@ export default function (pi: ExtensionAPI) {
 			}
 		};
 		signal("SIGTERM");
-		const escalate = setTimeout(() => signal("SIGKILL"), 2_000);
+		const escalate = setTimeout(() => {
+			killTimers.delete(child);
+			signal("SIGKILL");
+			// The handle is dead now: drop it while it is still this child's, so a
+			// cancelled or paused wake-up does not keep a pid around for a group the
+			// OS may have recycled for something else.
+			if (wake.child === child) wake.child = undefined;
+		}, 2_000);
 		escalate.unref?.();
+		// 留下定时器的引用：`finish` 在子进程收尾时清掉它，否则这条 SIGKILL 可能在
+		// 两秒后打到一个已被 OS 回收、属于别人的进程组上。
+		killTimers.set(child, escalate);
 	}
 
 	/** Drop a `wait` wake-up that ended without waking, telling the user why once. */
@@ -560,6 +584,11 @@ export default function (pi: ExtensionAPI) {
 	async function fire(id: string, waitOutput?: string, lateNote = "pi was not running") {
 		const wake = wakes.get(id);
 		if (!wake) return;
+		// Unreachable as the callers stand — `pause` clears the timer, the `wait` branch
+		// and the replay path both gate on `paused` first, and `fire` runs synchronously
+		// to its first `await`. It is here so the invariant holds if a caller changes,
+		// and it is deliberately not claimed as load-bearing: no case can pin it.
+		if (wake.paused) return;
 
 		let evidence = "";
 		if (wake.wait) {
@@ -568,10 +597,11 @@ export default function (pi: ExtensionAPI) {
 			evidence = (waitOutput ?? "").trim().slice(-MAX_EVIDENCE_CHARS);
 			wake.lastStdout = waitOutput ?? "";
 		} else if (wake.when) {
-			// The generation is the token for this attempt: a pause bumps it, and
-			// `resume` clears `paused` again, so without it a probe that resolves
-			// after a resume would burn a slot the user asked to hold (an extra
-			// reminder for `every`, with the cadence recounted from the resumed slot).
+			// The generation is the token for this attempt: `resume` bumps it, so
+			// without it a probe that resolves after the resume would burn a slot the
+			// user asked to hold (an extra reminder for `every`, with the cadence
+			// recounted from the resumed slot). While the pause itself lasts,
+			// `paused` in the guard below is what discards the result.
 			const attempt = wake.generation;
 			const outcome = await evaluateCondition(wake);
 			// Cancelled, paused or resumed while the condition ran: give up quietly.
@@ -812,15 +842,15 @@ export default function (pi: ExtensionAPI) {
 					if (wake.paused) return reply(`${id} is already paused.`, {});
 					if (wake.timer) clearTimeout(wake.timer);
 					wake.timer = undefined;
-					// Everything in flight belongs to the previous attempt now: the
-					// killed child reports its `close` later — after a `resume` may have
-					// started the next one — and a `when` evaluation that resolves after
-					// the resume must not fire a slot the pause was asked to hold.
-					wake.generation += 1;
+					// Two defences hold this window, one per layer, and neither is the
+					// counter: while the pause lasts, `wake.paused` alone stops the killed
+					// child's `close` and an in-flight `when` result; once `resume` clears
+					// it, the generation bumped by the resume is what retires them, so
+					// neither can fire a slot the pause was asked to hold.
 					// A paused wake-up never fires, so the watch command it started
 					// has nobody to wake: keep the entry, stop the process. An in-flight
-					// `when` child is not killed here — the generation check discards its
-					// result, and `whenTimeout` bounds how long it can run.
+					// `when` child is not killed here — `paused` discards its result while
+					// the pause lasts, and `whenTimeout` bounds how long it can run.
 					if (wake.wait) killWaitChild(wake);
 					wake.paused = true;
 					record(baseEntry(wake));

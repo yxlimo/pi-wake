@@ -36,10 +36,22 @@ deliberately outside the tree so a review can never modify what it reviews.
 
 ## Commands
 
+The sandbox you run in exports `PI_SUBAGENT_CHILD=1`, and the extension deliberately registers no
+tool for that value, so a plain `pnpm test` dies on `Cannot read properties of undefined (reading
+'execute')`. Drop the variable for the run:
+
 ```bash
-cd packages/pi-plugin && node test/extension.test.mjs    # the suite
-node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit   # typecheck
+# Two single commands, run from the repo root: this profile has no `cd` in its
+# allowlist and refuses `&&`, so a chained form fails before the suite starts.
+node --import 'data:text/javascript,delete process.env.PI_SUBAGENT_CHILD' packages/pi-plugin/test/extension.test.mjs
+node packages/pi-plugin/node_modules/typescript/bin/tsc -p packages/pi-plugin/tsconfig.json --noEmit
 ```
+
+Never probe the extension with `node --input-type=module -e '...import(...)'`: the module keeps
+timers and child handles alive, so the probe never exits — a run that hangs for minutes is the
+symptom, not a crash. The suite is the supported way to run the extension's code, and each case
+already exercises it against a fake pi API. The same caution applies to any loader-based trick that
+imports `src/index.ts` outside a case: it leaves the process alive.
 
 Write the report to `/tmp/pi-review-reports/<pr-or-branch>.md` and keep your final reply short: the
 severity counts, the merge verdict, and anything the parent must decide.
