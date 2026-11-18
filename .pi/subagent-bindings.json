@@ -1,0 +1,84 @@
+{
+  "default": {
+    "maxDenies": 8,
+    "maxWriteDenies": 4,
+    "bash": {
+      "deny": [
+        "git commit",
+        "git push",
+        "git rebase",
+        "git merge",
+        "git reset",
+        "git clean",
+        "git checkout",
+        "git restore",
+        "rm -rf"
+      ]
+    }
+  },
+  "coder": {
+    "scope": ["."],
+    "writeScope": ["."],
+    "bash": {
+      "read": [
+        "git status",
+        "git diff",
+        "git log",
+        "git show",
+        "git branch",
+        "git rev-parse",
+        "cat",
+        "ls",
+        "rg",
+        "find",
+        "grep",
+        "sed",
+        "head",
+        "tail",
+        "wc",
+        "echo",
+        "node",
+        "pnpm test",
+        "pnpm run typecheck",
+        "pnpm run lint",
+        "npx tsc"
+      ],
+      "write": [
+        "mkdir",
+        "cp",
+        "mv",
+        "rm",
+        "touch",
+        "sed",
+        "node",
+        "git init",
+        "git add",
+        "git switch",
+        "git stash"
+      ],
+      "deny": [
+        "git commit",
+        "git push",
+        "git rebase",
+        "git merge",
+        "git reset",
+        "git clean",
+        "git checkout",
+        "git restore",
+        "rm -rf"
+      ],
+      "writable": true,
+      "network": false
+    }
+  },
+  "review": {
+    "scope": ["."],
+    "readOnly": true,
+    "allowTools": ["read", "grep", "find", "ls", "bash", "write"],
+    "writeScope": ["/tmp/pi-review-reports"],
+    "bash": {
+      "read": ["git status", "git diff", "git log", "git show", "rg", "cat", "ls", "wc", "node"],
+      "deny": ["git commit", "git push"]
+    }
+  }
+}
