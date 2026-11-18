@@ -10,6 +10,8 @@ typed.
 wake_up({ action: "schedule", after: "90m", prompt: "run the typecheck again" })
 wake_up({ action: "schedule", at: "2026-11-12T09:30:00+08:00", prompt: "check whether CI finished" })
 wake_up({ action: "list" })
+wake_up({ action: "pause", id: "w1" })
+wake_up({ action: "resume", id: "w1" })
 wake_up({ action: "cancel", id: "w1" })
 wake_up({ action: "cancel", all: true })
 ```
@@ -44,7 +46,9 @@ pi -e <clone>/packages/pi-plugin/src/index.ts
 | action | fields | effect |
 | --- | --- | --- |
 | `schedule` | `at`, `after` or `every`, or `wait`; plus `prompt`; optional `when` gate | arm a wake-up, returns its `id`; `every` repeats until cancelled; `wait` fires when its command exits |
-| `list` | — | pending wake-ups, nearest first, with the time left (a `wait` entry shows how long it has been waiting) |
+| `list` | — | pending wake-ups, nearest first, with the time left (a `wait` entry shows how long it has been waiting), plus the five most recent firings |
+| `pause` | `id` | stop a wake-up firing without dropping it; a paused `wait` has its command stopped |
+| `resume` | `id` | re-arm it: `every` waits a full interval from now, an overdue one-shot fires at once |
 | `cancel` | `id`, or `all: true` | drop one or all pending wake-ups |
 
 The same list is available to a human as the `/wake` command.
@@ -55,7 +59,7 @@ offset wins; without one the local time zone is used. A bare date
 `2h`, `1h30m`, `45s`, `3d`. Both forms end up as a delay from now.
 
 **Repeat.** `every` takes the same durations and makes the wake-up come back at
-that interval until it is cancelled — `wake_up({ action: "schedule", every: "5m",
+that interval until it is cancelled or paused — `wake_up({ action: "schedule", every: "5m",
 prompt: "check the PR for reviews and CI, and act on anything asked" })`. Without `after` the first one
 fires one interval from now; with `after`, that is only the first delay. The
 minimum interval is `1s`.
@@ -78,6 +82,22 @@ pending one is started again when the session is reopened. Its stdout is the
 evidence in the reminder.
 
 Its `whenLang` counterpart is `waitLang` (`sh` default, or `node`).
+
+**Pause.** `pause` stops a wake-up firing without dropping it; `resume` arms it
+again — `wake_up({ action: "pause", id: "w1" })`, later `wake_up({ action:
+"resume", id: "w1" })`. The entry is kept, so the list still shows it (marked
+`paused`), and a reopened session restores it paused. A paused `wait` has its
+command stopped, and resume starts it again. What resume does depends on the
+wake-up:
+
+- `every`: the next slot is one full interval from the moment you resume. Slots
+  that passed while it was paused are not fired — catching up would fire the
+  wake-up several times back to back.
+- a one-shot whose time passed while it was paused: it fires as soon as you
+  resume, because the instruction it carries was left for exactly that moment —
+  waiting for a new time would delay a turn that is already overdue. Its reminder
+  says it is late because it was paused, not because pi was closed.
+- a one-shot still in the future: it keeps its original time.
 
 **Prompt.** `prompt` is what the waking turn is told to do. Write the next
 action, not a restatement of the task — the waking turn still has the whole
@@ -142,10 +162,11 @@ Loading the extension is the only requirement; `files` in `package.json` include
 - **Reopening a session restores pending wake-ups.** The schedule is stored in
   the session file, so `/resume` picks it up again. A wake-up that came due while
   pi was closed fires immediately on reopen, and its message says how late it is.
+  A paused wake-up is restored as paused rather than armed.
 - **Repeating wake-ups keep the cadence and skip missed slots.** With `every` the
   wake-up re-arms itself after each firing. If pi was closed across several
   slots, it fires once and continues from the next slot instead of catching up.
-  Only `cancel` stops it.
+  Only `cancel` stops it — or `pause`, which holds it until `resume` re-arms it.
 - **Subagents get no `wake_up`.** A background child runs with
   `PI_SUBAGENT_CHILD=1` and loads ambient extensions, so a global install reaches
   it too; there the extension registers no tool and no `/wake` command, because a
