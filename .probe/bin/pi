@@ -1,5 +1,0 @@
-#!/bin/sh
-# Scratch pi shim: herdr panes inherit the probe server's PATH, so `pi` resolves here.
-export HOME=/home/shay/extensions/pi-wake/.probe/home
-export PI_CODING_AGENT_DIR=/home/shay/extensions/pi-wake/.probe/home/.pi/agent
-exec /nix/store/x7xgahfvf8lf063cs20ybyby6cirxzim-pi-npm-1.5.2/bin/pi "$@"
