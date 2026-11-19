@@ -40,7 +40,9 @@ You are confined by `pi-subagents-extend` right now, through this project's prof
 
 ## Tests
 
-Tests are TypeScript under `packages/pi-plugin/test/` and are run with plain `node`.
+The source is TypeScript; the tests are plain `.mjs` under `packages/pi-plugin/test/` and are run with
+`node`, so a case needs no build step. `pnpm test` is that one suite; `pnpm run typecheck` covers the
+source.
 
 ```bash
 cd packages/pi-plugin && pnpm test
