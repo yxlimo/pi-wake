@@ -189,12 +189,19 @@ its own copies. Session-file integrity is safe; wake semantics are not.
   1. The in-flight turn was **not** interrupted: the full long answer arrived *after* the
      mid-turn submission in both turns, and there is no abort/cancel entry in the session
      file.
-  2. The submitted message was **held by the TUI, not delivered early**: its user entry
-     appears in the session file at turn end (`.529Z → .530Z` in turn A), timestamped when
-     pi drained it, not when it was typed.
+  2. The submitted message was **not delivered early**: its user entry appears in the
+     session file at turn end (`.529Z → .530Z` in turn A), timestamped when pi drained it,
+     not when it was typed. *Held by the TUI* was the first reading; PTY line-discipline
+     buffering before pi ever read the bytes fits the same timestamps, and this run cannot
+     tell them apart.
   3. The queued message then ran **as its own turn** — the human-visible behaviour of a
      wake prompt sent mid-turn is "the agent finishes what it is doing, then handles the
      wake".
+
+**What this does not establish.** Exactly one mid-turn submission was in flight per turn,
+so "queued" is distinguished from "lost" for N=1 only; whether two submissions arriving
+mid-turn are both queued or coalesced into one turn was not measured, and that is the
+shape a storm of overdue wakes would arrive in.
 
 **Conclusion.** A wake delivered into a working pi TUI pane queues behind the in-flight
 turn and is processed afterwards, in both the plain-Enter and the bracketed-paste encoding
@@ -288,8 +295,10 @@ assistantEntries(non-system total): 4
   "customType":"wake_up","content":"⏰ Scheduled wake-up · …\n(Fired 48s late — pi was not
   running.)\nThe instruction you left for yourself: …","display":true}`) with full
   display text, and the model answers each in its own follow-up turn. The first run's
-  `wakeMessageCount: 0` was a property of the *failing* turn (queued follow-ups never
-  delivered while the model call was stuck in retries), not of delivery in general.
+  `wakeMessageCount: 0` was a counter in its own probe script that was never given a
+  definition — it measured nothing, and both runs' later explanations of it were wrong:
+  the review found two `custom_message` entries appended during run 1's retry window
+  (`q4.jsonl` at 23:28:10 / 23:28:24), so reminders persisted in run 1 as well.
 - **4. N overdue wakes → N sequential turns, no coalescing** (measured N=3: three
   `custom_message` entries, three separate assistant replies, ~4.5 s apart). The "storm"
   size is linear in the number of overdue wakes; each turn runs the full toolset (Q7).
@@ -382,45 +391,58 @@ measured this run, a prompt arriving mid-turn queues instead of interrupting (Q2
 
 ## Recommendation
 
-**A where the session's herdr pane is alive; B (in-session catch-up) for everything
-else. One mechanism, two delivery surfaces; no outbox; no lock file.**
+**B only: in-session firing, with catch-up on the next session start. No external
+dispatcher, no systemd timer, no outbox, no lock file — and no A.**
 
-Why the recommendation changes from the first run's plain B: the first run rejected A
-because its dispatch mechanism rested on unverified documentation. This run measured the
-mechanism that decides A: a submission arriving mid-turn **queues behind the in-flight
-turn and is processed afterwards** (Q2, both plain and bracketed-paste encodings; the
-in-flight turn's full 3000-number answers completed after the queued submissions in
-~1m53s / ~2m01s of in-flight time, no abort entries), and an idle submission starts a
-turn. herdr's own part is thin — `agent prompt` writes bytes into the pane — and its
-server, CLI-over-socket, and per-session isolation were measured working; only the pane
-plumbing is still unmeasured, and that is a sandbox PTY wall (`/dev/ptmx` EACCES), not a
-herdr finding, with the end-to-end script already staged in `.probe/q2run.mjs`.
+The second run raised this to a hybrid (A into a live pane, B elsewhere) on the strength of
+the queueing measurement. A review killed that on a point this document should have caught
+itself: **there is no case where A is both possible and needed.**
 
-Re-weighed:
+- If the session's pane has a live agent, that pi process is running, so pi-wake's own
+  in-session timer already fires the wake at `dueAt`. A would deliver a second copy of
+  something already delivered.
+- If the session is closed — the actual problem this investigation exists for — the pane
+  has no live agent, so `agent prompt` has nothing to deliver to (Q3 shapes 1–2, both
+  measured). The only dispatch left is `herdr agent start`, which is an unattended
+  restart: that is B with extra steps, plus the Q7 objection.
 
-- **A (dispatch into a live pane)** is now evidence-backed for the dominant case on this
-  machine (five long-lived herdr panes, sessions open essentially always). It is
-  *supervised* — the Q7 objection does not apply, herdr refuses `agent_blocked` prompts,
-  and a queued wake waits its turn instead of multiplying turns the way headless
-  dispatch does (Q4.4). Detection of "is A possible" is one measured signal: connect to
-  the socket (Q3 shape 1); if the pane's agent is gone (Q3 shape 2, signal documented,
-  not yet observed live), fall back.
-- **B (do nothing; catch up on next session start)** remains the fallback for closed
-  sessions and needs zero new state — measured: reopen restores, fires, and annotates
-  overdue wakes by itself (Q4.3). The cost of B is only lateness.
-- What A must not do is dispatch headless `--print` (Q4 + Q7): that is the unsupervised,
-  turn-multiplying variant, not A's pane delivery.
+So the queueing result is real but decides a case nobody needs. What it does establish is
+narrower and still useful: **`herdr agent prompt` is a safe delivery channel for a running
+pane** — it does not cut off an in-flight turn, in either the plain-Enter or the
+bracketed-paste encoding herdr uses, and an idle pane starts a turn immediately. If a
+human wants to nudge an open session, that is the mechanism; it is not a wake delivery
+mechanism for a closed one.
 
-**Implication for the open todo (persistent outbox, multi-session locking):**
+What this leaves:
 
-- *Outbox: confirmed droppable.* The session file is the schedule (Q5) and the catch-up
-  path restores, fires and annotates without any external copy (Q4.3). No outbox.
-- *Locking: no lock file — confirmed — but "nothing outside the session" was too strong
-  for the timer-dispatch variant.* Integrity needs no lock (Q1d), and no dispatcher
-  overlaps itself (Q6 doc). But an external dispatcher must still consult the session's
-  `firedAt`/`cancelledAt` anchor before dispatch and record its decision in the small
-  advisory ledger of Q5 — otherwise every timer tick re-delivers the same overdue wake
-  (the measured duplicate-fire hazard of Q1/Q4). Protocol, not locking.
+- **Closed session (the actual gap):** nothing is delivered until the session is reopened;
+  pi-wake then restores, fires, and annotates each overdue wake by itself (Q4.3, measured).
+  The cost is lateness, which is visible to the model because the reminder says
+  "(Fired 1m3s late — pi was not running.)".
+- **Do not dispatch headless `--print`** (Q4 + Q7). It is now measured in detail and it is
+  the wrong tool: it fires every overdue wake mid-turn, burns one full agent turn per
+  wake, persists its reminders into the transcript of a session a human is not watching,
+  involves the full toolset unattended, and does not exit on its own when the model
+  endpoint is unreachable.
+- **The reason to reconsider B** would be a case where lateness is unacceptable — a
+  deploy watch or a CI gate whose result is stale by the time a human reopens the pane.
+  That case is not served by A either; it is served by a `wait`-mode watcher in a session
+  that stays open, which is what `wait` already exists for.
+
+**Implication for the open todo (persistent outbox, multi-session locking):** both can be
+dropped *for this design*, and the earlier draft's "no outbox, no lock" headline was only
+half honest:
+
+- *No lock:* Q1 measured both shapes — opening a session file that does not exist is an
+  exclusive create (the second writer fails `EEXIST`), and two processes appending to an
+  existing one interleave with 22 of 22 lines remaining valid JSON. No lock is needed for
+  integrity.
+- *No outbox — but only because nothing is dispatched.* The moment an external dispatcher
+  exists (a timer, a headless `--print`, anything that delivers while the session is shut),
+  it must record what it delivered outside the session file or it re-delivers on every
+  tick: that record **is** an outbox. The first draft claimed it was "a small advisory
+  ledger, not an outbox", which is a rename, not a design. Since the recommendation is B
+  only, nothing needs it — and if A is ever revisited, the outbox todo comes back with it.
 
 ## Cleanup statement
 
@@ -430,14 +452,21 @@ list` → `server_not_running`), the PTY nested pi via SIGKILL (relay exited on 
 bash-call sandbox itself killed one earlier detached server (recorded as a trap above);
 final sweep: no process matching herdr/pi/ptyrelay except this session's own helper, both
 probe socket paths absent. No systemd unit was created, nothing was committed. `.probe/`
-(retained for the follow-up: scripts, `ptyrelay.c`, scratch home with the one
-secret-bearing `auth.json` copy — git-ignored) is removable with the scratch tree.
+probe socket paths absent. No systemd unit was created, nothing was committed.
+
+`.probe/` is git-ignored and kept only for the scripts a follow-up run would need
+(`q1*.mjs`, `q2pty.mjs`, `q2run.mjs`, `ptyrelay.c`) plus the session files they produced.
+Its 193 MB scratch home — including the one secret-bearing `auth.json` copy and the whole
+provisioned package tree — was deleted after the measurements were quoted, as was the
+1.4 MB PTY log; 628 KB remains and carries no credentials.
+
 
 ## Not measured — summary
 
 | Question | Status | Exact blocker |
 | --- | --- | --- |
 | Q2 herdr pane plumbing end-to-end (`agent start` → detection → `agent prompt` in a real pane) | not measured | sandbox denies PTY allocation: `failed to openpty: PermissionDenied` / `open /dev/ptmx → EACCES`; needs the `/dev/ptmx` grant; scripted in `.probe/q2run.mjs` |
+| Q2 queue vs coalesce (two submissions arriving mid-turn) | not measured | one mid-turn submission per turn was injected; N=1 distinguishes queued from lost only |
 | Q3 shape 2 (pane alive, agent dead) observed live | not measured | same PTY wall — no pane can exist in-sandbox; detection signal documented (SKILL.md), not observed |
 | Q3 shape 3 as a live observation | not needed | source-measured: subagents never report (`PI_SUBAGENT_CHILD`, `rootSession`/TUI gates) |
 | Q6 timer survival, `Persistent=true` after suspend, probe unit in `list-timers` | parent-measured | cited from `docs/investigations/q6-systemd-parent-measured.md`; this run created no unit |
