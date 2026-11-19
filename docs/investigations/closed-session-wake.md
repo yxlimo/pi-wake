@@ -337,11 +337,11 @@ The session file is the schedule, and this run strengthens the anchor:
   session restores, fires, and *annotates* overdue wakes on its own ("Fired 1m3s late —
   pi was not running", Q4.3).
 
-Minimal external state, if anything dispatches externally (timer → herdr or → headless):
-a **dispatch ledger**, not a second copy of the schedule — one JSON line per dispatch
-decision `{session_path, wake_id, due_at, dispatched_at, via}` under `~/.local/state/
-pi-wake/` (append `O_APPEND`, single `write()`, line-atomic per Q1a). Correctness anchor
-stays the session file: before dispatching, parse the latest `wake_up` entry for the id;
+Minimal external state when the dispatcher is a timer spawning a headless run: a **dispatch
+ledger**, not a second copy of the schedule — one JSON line per dispatch decision
+`{session_path, wake_id, due_at, dispatched_at, via}` under `~/.local/state/pi-wake/`
+(append `O_APPEND`, single `write()`, line-atomic per Q1a). Correctness anchor stays the
+session file: before dispatching, parse the latest `wake_up` entry for the id;
 `firedAt`/`cancelledAt` present → skip.
 
 **Locking: the first run's "no multi-session lock file is required" stands — with a
@@ -379,70 +379,86 @@ concrete action in `prompt`"). Combine: an unattended headless dispatch is an ag
 executing imperative instructions with full tools and no supervision, several turns in
 sequence, and it can stall invisibly.
 
-**Conclusion: a closed-session wake must default to "deliver facts, do not act".** No
-headless full-agent resume as a dispatch vehicle; if a design ever dispatches headless,
-it must declare its tool surface explicitly (`--tools read,grep,find,ls` / `--no-tools`,
-from `pi --help`) — never the default full toolset. The supervised alternative is
-delivery into a live pane via herdr (`agent prompt`), where herdr's `blocked` detection
-and the visible pane provide the human surfaces a `--print` run has none of — and where,
-measured this run, a prompt arriving mid-turn queues instead of interrupting (Q2).
+**Conclusion: this is the user's call, not the implementation's.** An unattended headless
+dispatch is an agent executing imperative prompts with the full toolset and no supervision;
+the owner of the machine has accepted that risk, so the design must not silently refuse it.
+What it owes instead is the facts and a way out:
+
+- the risk is documented where the timer or daemon is configured, in those words;
+- the spawned run's tool surface is adjustable (`--tools read,grep,find,ls` / `--no-tools`,
+  from `pi --help`) so a user who does *not* accept the risk can narrow it without forking;
+- a stalled run is visible (it can neither be silent nor retried forever), because the
+  measured failure mode is a run that keeps retrying without exiting or telling anyone.
 
 ---
 
 ## Recommendation
 
-**B only: in-session firing, with catch-up on the next session start. No external
-dispatcher, no systemd timer, no outbox, no lock file — and no A.**
+**A: out-of-process delivery, herdr-*compatible* and not herdr-dependent. A timer (or a
+supervised daemon) delivers a due wake by spawning `pi --session <ownerFile> --print
+<facts>`; the session keeps its in-session timer for the case where the process is alive.
+Both surfaces exist, and neither is a fallback for the other.**
 
-The second run raised this to a hybrid (A into a live pane, B elsewhere) on the strength of
-the queueing measurement. A review killed that on a point this document should have caught
-itself: **there is no case where A is both possible and needed.**
+Two things the earlier drafts of this section got wrong, both corrected here:
 
-- If the session's pane has a live agent, that pi process is running, so pi-wake's own
-  in-session timer already fires the wake at `dueAt`. A would deliver a second copy of
-  something already delivered.
-- If the session is closed — the actual problem this investigation exists for — the pane
-  has no live agent, so `agent prompt` has nothing to deliver to (Q3 shapes 1–2, both
-  measured). The only dispatch left is `herdr agent start`, which is an unattended
-  restart: that is B with extra steps, plus the Q7 objection.
+**1. herdr is a compatibility constraint, not a delivery channel.** The requirement was
+never "use herdr to deliver"; it was "do not break on a machine that runs pi under herdr".
+That reduces to three obligations, all measured: never corrupt the session file a herdr pane
+has open (Q1 — appends interleave safely, and opening a *missing* file is an exclusive
+create, so the dispatcher must expect `EEXIST` rather than assume it won); never assume we
+are the only writer of that file; and never require herdr's API or its socket to work. The
+queueing measurement (Q2) stays useful only as a fact about what a prompt into a live TUI
+does — it is not the design's delivery path, because when the pane is live the in-session
+timer already fired.
 
-So the queueing result is real but decides a case nobody needs. What it does establish is
-narrower and still useful: **`herdr agent prompt` is a safe delivery channel for a running
-pane** — it does not cut off an in-flight turn, in either the plain-Enter or the
-bracketed-paste encoding herdr uses, and an idle pane starts a turn immediately. If a
-human wants to nudge an open session, that is the mechanism; it is not a wake delivery
-mechanism for a closed one.
+**2. The "storm" is narrower than this document first claimed.** With out-of-process
+delivery running, overdue wakes do not *accumulate*: each is delivered at its due time. The
+only way a backlog forms is that nothing was dispatching while the process was closed — a
+config edit made while closed, a timer that was off, a first run before the timer existed.
+So the fix is not "never spawn headless"; it is a rule for exactly that case: **on session
+start, discard overdue wakes instead of firing them**, and say so once ("2 overdue wake-ups
+discarded: nothing was delivering while the session was closed"). Firing them is what turns
+one spawn into N turns; discarding makes a backlog a no-op.
 
-What this leaves:
+What that leaves to build, in this order:
 
-- **Closed session (the actual gap):** nothing is delivered until the session is reopened;
-  pi-wake then restores, fires, and annotates each overdue wake by itself (Q4.3, measured).
-  The cost is lateness, which is visible to the model because the reminder says
-  "(Fired 1m3s late — pi was not running.)".
-- **Do not dispatch headless `--print`** (Q4 + Q7). It is now measured in detail and it is
-  the wrong tool: it fires every overdue wake mid-turn, burns one full agent turn per
-  wake, persists its reminders into the transcript of a session a human is not watching,
-  involves the full toolset unattended, and does not exit on its own when the model
-  endpoint is unreachable.
-- **The reason to reconsider B** would be a case where lateness is unacceptable — a
-  deploy watch or a CI gate whose result is stale by the time a human reopens the pane.
-  That case is not served by A either; it is served by a `wait`-mode watcher in a session
-  that stays open, which is what `wait` already exists for.
+1. **A passive mode for the spawned run** (the mechanism the sibling package calls
+   `WAKE_ALARM_PASSIVE=1`): the child registers the tool but never schedules, so a wake run
+   cannot re-arm its own wakes. Without this, one spawn becomes a cascade.
+2. **The discard-on-start rule** above, which removes the one remaining backlog case.
+3. **A delivery record outside the session** — a small outbox with a claim written under a
+   transaction lock, an entry cleared only on a clean exit and retried with capped backoff
+   otherwise. At-least-once: a rare duplicate is acceptable, a silent loss is not. This is
+   required precisely *because* delivery now happens outside the process.
+4. **A liveness signal for "is this session running?"** that needs neither herdr nor a lock
+   on the session file — a per-session heartbeat record with pid + session file, which is
+   also what tells the dispatcher a session it is about to spawn for has meanwhile come back.
+5. **The timer itself**, with the measured caveats: `Linger=yes` is a host prerequisite for a
+   `--user` timer (not a design property); `Persistent=true` catches up exactly once, so the
+   overdue set must be computed from the state file's due times rather than from the slot the
+   timer believes it is on; and a past one-shot calendar produces no run at all.
 
-**Implication for the open todo (persistent outbox, multi-session locking):** both can be
-dropped *for this design*, and the earlier draft's "no outbox, no lock" headline was only
-half honest:
+The unattended-execution risk is real and documented under Q7, and it is the owner's decision
+to take it; the implementation owes a configurable tool surface, not a refusal.
 
-- *No lock:* Q1 measured both shapes — opening a session file that does not exist is an
-  exclusive create (the second writer fails `EEXIST`), and two processes appending to an
-  existing one interleave with 22 of 22 lines remaining valid JSON. No lock is needed for
-  integrity.
-- *No outbox — but only because nothing is dispatched.* The moment an external dispatcher
-  exists (a timer, a headless `--print`, anything that delivers while the session is shut),
-  it must record what it delivered outside the session file or it re-delivers on every
-  tick: that record **is** an outbox. The first draft claimed it was "a small advisory
-  ledger, not an outbox", which is a rename, not a design. Since the recommendation is B
-  only, nothing needs it — and if A is ever revisited, the outbox todo comes back with it.
+**Implication for the open todo (persistent outbox, multi-session locking):** with A the
+outbox is **required**, and the locking question resolves to "not a lock on the session
+file":
+
+- *The outbox comes back.* The moment delivery happens outside the owning process, the
+  dispatcher must record what it delivered, or every tick re-delivers the same due wake. A
+  claim token under a transaction lock is what keeps two potential dispatchers (a timer and
+  a live session that just woke up) from double-delivering. At-least-once, not
+  exactly-once: duplicates are tolerable, losses are not — which is also why an entry is
+  cleared on a clean exit and retried on anything else.
+- *No lock on the session file itself.* Q1 measured both shapes — opening a missing file is
+  an exclusive create (the second writer gets `EEXIST`), and two processes appending to an
+  existing file interleave with all 22 lines remaining valid JSON. Integrity does not need
+  one, and a lock there would sit in the way of herdr's own pane, which is the compatibility
+  constraint from earlier.
+- *The multi-session question becomes a presence question.* What actually has to be known is
+  "is the session a wake belongs to currently running?" — answered by a heartbeat record per
+  session, not by a lock and not by herdr.
 
 ## Cleanup statement
 
