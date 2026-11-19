@@ -422,14 +422,20 @@ one spawn into N turns; discarding makes a backlog a no-op.
 
 What that leaves to build, in this order:
 
-1. **A passive mode for the spawned run** (the mechanism the sibling package calls
-   `WAKE_ALARM_PASSIVE=1`): the child registers the tool but never schedules, so a wake run
-   cannot re-arm its own wakes. Without this, one spawn becomes a cascade.
-2. **The discard-on-start rule** above, which removes the one remaining backlog case.
+1. **A passive mode for the spawned run** (the sibling package's `WAKE_ALARM_PASSIVE=1`):
+   the child still registers the `wake_up` tool, so the wake turn can list, cancel or create
+   wakes under its own policy — but it does not act as a scheduler: no presence claim, no
+   timer arming, no firing of overdue wakes, no spawning a dispatcher of its own. Without
+   this, one spawn becomes a cascade.
+2. **The discard-on-start rule** above, which removes the one remaining backlog case. In a
+   session that is *not* passive, an overdue wake is discarded with one notice rather than
+   fired; a passive run never fires anything by construction.
 3. **A delivery record outside the session** — a small outbox with a claim written under a
    transaction lock, an entry cleared only on a clean exit and retried with capped backoff
-   otherwise. At-least-once: a rare duplicate is acceptable, a silent loss is not. This is
-   required precisely *because* delivery now happens outside the process.
+   otherwise. A wake **may** be lost — what it must not be is lost *silently*: every dispatch
+   attempt, retry and terminal failure is written to a log that can be read back afterwards,
+   so "why did the 3am wake never arrive" has an answer on disk. Delivery is therefore
+   at-least-once in the normal path, and an explicit failure record in the bad one.
 4. **A liveness signal for "is this session running?"** that needs neither herdr nor a lock
    on the session file — a per-session heartbeat record with pid + session file, which is
    also what tells the dispatcher a session it is about to spawn for has meanwhile come back.
@@ -437,6 +443,12 @@ What that leaves to build, in this order:
    `--user` timer (not a design property); `Persistent=true` catches up exactly once, so the
    overdue set must be computed from the state file's due times rather than from the slot the
    timer believes it is on; and a past one-shot calendar produces no run at all.
+6. **`deliverAs` becomes configurable**, defaulting to today's `followUp` (the wake lands
+   when the current turn ends) with `steer` as the option (it lands at the next model step,
+   interleaved between tool calls). `followUp` stays the default because it does not change
+   the behaviour of a turn that is already producing an answer; `steer` is there for a wake
+   whose value decays — a CI result the agent should see before it finishes the thought it
+   is on.
 
 The unattended-execution risk is real and documented under Q7, and it is the owner's decision
 to take it; the implementation owes a configurable tool surface, not a refusal.
@@ -448,9 +460,9 @@ file":
 - *The outbox comes back.* The moment delivery happens outside the owning process, the
   dispatcher must record what it delivered, or every tick re-delivers the same due wake. A
   claim token under a transaction lock is what keeps two potential dispatchers (a timer and
-  a live session that just woke up) from double-delivering. At-least-once, not
-  exactly-once: duplicates are tolerable, losses are not — which is also why an entry is
-  cleared on a clean exit and retried on anything else.
+  a live session that just woke up) from double-delivering. The guarantee is not
+  exactly-once but *never silent*: a lost wake must leave a failure record behind, which is
+  also why an entry is cleared only on a clean exit and retried on anything else.
 - *No lock on the session file itself.* Q1 measured both shapes — opening a missing file is
   an exclusive create (the second writer gets `EEXIST`), and two processes appending to an
   existing file interleave with all 22 lines remaining valid JSON. Integrity does not need
