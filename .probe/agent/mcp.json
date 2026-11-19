@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "keenable": {
+      "headers": {
+        "Authorization": "!cat /run/secrets/rendered/keenable-bearer"
+      },
+      "url": "https://api.keenable.ai/mcp-oauth"
+    }
+  }
+}
