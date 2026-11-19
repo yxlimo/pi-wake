@@ -2,74 +2,87 @@
 
 Investigation, not a feature. Question: how can a pi-wake wake-up be delivered when the
 owning pi session is not running? Every claim below cites a command that was run and its
-(trimmed) output, run inside this repository's sandbox on 2026-11-19, branch `main`
-(working tree, nothing committed). Everything created for the probes lives under
-`.probe/` (git-ignored); no real session file was written to, and no live pi or herdr
-process was touched — `herdr agent list` against the real server is read-only and was
-used only to confirm the output shape the parent had already verified.
+(trimmed) output, inside this repository's sandbox. First run 2026-11-19 branch `main`;
+this second run (same day, 07:00–08:10 CST) on branch `docs/closed-session-wake`, with the
+three grants the first run lacked (`network: true`, `herdr --session` / `herdr agent start`
+/ `herdr pane`, inner store binary `re:^/nix/store/…/bin/pi`). Everything created for the
+probes lives under `.probe/` (git-ignored); no real session file was written to and no live
+pi or herdr process was touched. The systemd half of Q6 was measured by the parent session
+and lives in `docs/investigations/q6-systemd-parent-measured.md` — cited, not re-derived.
 
-Two traps discovered on the way, both of which will bite whoever implements this:
+## Traps that bite whoever implements this
 
 - **The `pi` on PATH is a nix wrapper that provisions state on every run.**
-  `/home/shay/.nix-profile/bin/pi` → `/nix/store/5xg7nbqb…-pi/bin/pi` is a shell script
-  that, on *every* invocation, merges a machine-provisioned settings patch into
-  `$PI_CODING_AGENT_DIR/settings.json`:
-
-  ```text
-  merge_settings_json() {
-    file="$PI_CODING_AGENT_DIR/settings.json"
-    patch=/nix/store/2z8sn394lp3y04hk8rs73kcrxmpy7nd3-pi-settings.json
-    tmp="$(mktemp "$PI_CODING_AGENT_DIR/.settings.json.XXXXXX")"
-    jq -s '.[0] * .[1]' "$file" "$patch" > "$tmp"   # or from {} if absent
-    mv "$tmp" "$file"
-  }
-  ```
-
-  The patch is `{"npmCommand":["…/pnpm"],"packages":["npm:pi-web-access","npm:pi-lens",
-  …19 packages…]}` — so a scratch agent dir silently grows the full user package list and
-  the first scratch run then spends ~140 s failing to npm-install it (offline). A scratch
-  pi must therefore call the inner store binary
-  `/nix/store/x7xgahfvf8lf063cs20ybyby6cirxzim-pi-npm-1.5.2/bin/pi` directly, with
-  `HOME` *and* `PI_CODING_AGENT_DIR` pointed at a scratch tree, and a minimal
-  `settings.json` (`{"lastChangelogVersion":"1.5.2"}`). It also installs `mcp.json`
-  (`keenable` MCP) the same way. This is why every scratch run below uses the inner
-  binary plus `HOME=$PWD/.probe/home`.
+  `/home/shay/.nix-profile/bin/pi` → `/nix/store/5xg7nbqb…-pi/bin/pi` merges a
+  machine-provisioned settings patch (`{"npmCommand":["…/pnpm"],"packages":[20 packages]}`)
+  into `$PI_CODING_AGENT_DIR/settings.json` on *every* invocation, so a scratch agent dir
+  silently grows the full user package list and the first offline scratch run spends ~140 s
+  failing to npm-install it. Scratch runs must call the inner store binary
+  `/nix/store/x7xgahfvf8lf063cs20ybyby6cirxzim-pi-npm-1.5.2/bin/pi` directly with `HOME` and
+  `PI_CODING_AGENT_DIR` pointed at a scratch tree. A scratch `pi` shim at `.probe/bin/pi`
+  (export scratch `HOME`/`PI_CODING_AGENT_DIR`, `exec` the inner binary) makes herdr's
+  `--kind pi` resolve to the scratch agent via the server's inherited `PATH`.
 
 - **The herdr integration reports state in TUI mode only.**
   `/home/shay/.pi/agent/extensions/herdr-agent-state.ts` (installed by herdr,
-  `HERDR_INTEGRATION_VERSION=9`):
+  `HERDR_INTEGRATION_VERSION=9`): `session_start` returns early unless `ctx?.mode === "tui"`,
+  and all state reports are gated on `rootSession`, so a headless `pi --print` run never
+  reports `pane.report_agent_session`, never appears in `herdr agent list`, and subagent
+  sessions never report either. It finds the socket purely via `process.env.HERDR_SOCKET_PATH`
+  plus `HERDR_ENV === "1"` + `HERDR_PANE_ID` — all injected by the pane.
 
-  ```ts
-  pi.on("session_start", async (event, ctx) => {
-    // TUI only: RPC/JSON/print modes are headless (no PTY herdr can display) …
-    if (ctx?.mode !== "tui") {
-      return;
-    }
-    rootSession = true;
-    updateSessionRef(ctx);
-    await reportSession(event?.reason);
+- **herdr socket isolation comes from `XDG_CONFIG_HOME`, not `XDG_STATE_HOME`.** Measured:
+
+  ```text
+  $ herdr --session probe agent list
+  {"error":{"code":"server_not_running","message":"no herdr server is running at
+    /home/shay/.config/herdr/sessions/probe/herdr.sock; run `herdr session attach probe` …"}}
+  $ XDG_STATE_HOME=$PWD/.probe/herdr herdr --session probe agent list   # same message, same path
+  $ XDG_CONFIG_HOME=$PWD/.probe/config herdr --session probe agent list
+  … no herdr server is running at $PWD/.probe/config/herdr/sessions/probe/herdr.sock …
   ```
 
-  Consequence: a headless `pi --print` run — the dispatch vehicle one would naturally
-  reach for — is **invisible to herdr**: it never reports `pane.report_agent_session`,
-  never reports working/idle, and would never appear in `herdr agent list`. Also all
-  state events (`agent_start`, `agent_settled`) are gated on `rootSession`, so subagent
-  sessions never report either.
+  `--session <name>` addresses a *separate server per name* (socket
+  `$XDG_CONFIG_HOME/herdr/sessions/<name>/herdr.sock`) — that is the sanctioned isolation
+  path (SKILL.md: "Use named test sessions for experiments that need an isolated server").
+  `XDG_STATE_HOME` alone moves nothing: the first run's env-var-only "isolation" silently
+  talked to the real server because the socket lives under the config dir. Bare
+  `herdr --session probe` needs a TTY (`cannot attach without a usable terminal`), and
+  `herdr session attach probe` inside a herdr pane is refused by the nested-herdr guard
+  (`nested herdr is disabled by default`). What works headless:
+  `XDG_CONFIG_HOME=$PWD/.probe/config herdr server` — a fully isolated headless server whose
+  API socket is `$XDG_CONFIG_HOME/herdr/herdr.sock`, stoppable with `herdr server stop`
+  against the same env (stopped it, socket removed — see Q3).
 
-## Sandbox reality vs the task description
+- **The sandbox denies PTY allocation via `/dev/ptmx` but allows `/dev/pts/ptmx`.**
 
-The task said `herdr`, `systemctl --user`, `journalctl --user`, `loginctl` and `pi` were
-allowlisted. The actual profile (`investigator` in `.pi/subagent-bindings.json`) allows a
-narrower set: among others `herdr agent list|api`, `pi --version|--session|--help`,
-`systemctl --user list-timers|show|cat|is-active|is-enabled`, `journalctl --user`,
-`loginctl show-user` (read); `herdr agent prompt|wait`, `herdr session|tab|workspace`,
-`systemctl --user start|stop|enable|disable|daemon-reload` (write). Notably **not**
-allowed in this run: `herdr --session <name> …` (the named-session isolation path), `herdr
-agent start`, `herdr pane …`, any `kill`, and network. Each refusal below is quoted where
-it blocked a question. The parent has since approved grants for
-`herdr --session probe …`, `herdr agent start` and `herdr pane …`, plus `network: true`,
-but a profile is read once at session start, so they do **not** reach this run; they are
-recorded here so a follow-up run can finish Q2/Q3.
+  ```text
+  open("/dev/ptmx")     → EACCES (node; mode 20666, uid 0 — a sandbox rule, not DAC)
+  open("/dev/pts/ptmx") → OK
+  $ herdr --session probe  (after server start) → workspace create:
+  {"error":{"code":"workspace_create_failed","message":"failed to openpty: Os { code: 13,
+    kind: PermissionDenied, message: \"Permission denied\" }"}}
+  ```
+
+  Consequence: **no herdr pane can be created inside this sandbox at all**, so the herdr
+  pane layer (`agent start` into a pane, `agent prompt` into that pane) cannot be exercised
+  end-to-end here — that refusal is a sandbox property, not evidence about herdr (the real
+  server outside runs 5 agents in panes). A bind-mount/symlink attempt to expose
+  `/dev/pts/ptmx` as `/dev/ptmx` failed (`mount: mount point is not a directory`, `unlink:
+  EACCES`). The minimal grant a future in-sandbox probe needs is whatever rule blocks
+  `/dev/ptmx` opens; with it, `herdr agent start --kind pi` + `herdr agent prompt` become
+  testable exactly as scripted in `.probe/q2run.mjs`.
+
+- **Background processes do not survive a bash call.** The first detached herdr server
+  (spawned `detached`+`unref` from a node script) was gone when the next bash call ran, and
+  `herdr agent list` returned `server_not_running`. Every server experiment therefore runs
+  as one node script that starts the server, runs all steps, and stops the server at the end.
+  (Also observed: an orphan from an earlier run leaves a *stale socket file* that makes a
+  naive "socket exists → skip spawn" check hang; probe scripts must connect-test and remove
+  stale sockets before spawning.)
+
+- **`herdr agent prompt --timeout` requires `--wait`** (CLI syntax, measured:
+  `--timeout requires --wait`, exit 2).
 
 ---
 
@@ -77,13 +90,6 @@ recorded here so a follow-up run can finish Q2/Q3.
 
 **Question.** Does `pi --session <file> --print "…"` against a session file another pi
 has open corrupt it, collide on a lock, or interleave safely?
-
-Two scenarios were measured, both with scratch sessions under `.probe/` and a scratch
-agent dir (`.probe/home`, redirected `HOME` + `PI_CODING_AGENT_DIR`, inner store binary,
-`--provider buddy --model coder-c`). The network was off, so the model call failed —
-that does not matter for the question: pi writes session entries (header, model change,
-user message, retry/error entries) regardless, and both processes ran to completion of
-their writes.
 
 ### 1a. Mechanical baseline: two concurrent JSONL appenders
 
@@ -103,11 +109,10 @@ VERDICT q1a: no interleaving, no truncation, no lost writes
 not exist yet:
 
 ```text
-{"tag":"first","code":1,"sig":null,"ms":14581,"err":"Connection error.: connect ENETUNREACH …"}
-{"tag":"second","code":1,"sig":null,"ms":568,"err":"EEXIST: file already exists, open
+{"tag":"first","code":1,"ms":14581,"err":"Connection error.: connect ENETUNREACH …"}
+{"tag":"second","code":1,"ms":568,"err":"EEXIST: file already exists, open
   '/home/shay/extensions/pi-wake/.probe/state/q1c.jsonl'\n"}
-{"totalLines":12,"entryTypes":{"session":1,"model_change":1,"thinking_level_change":1,
- "message":6,"context_edit":3},"sessionHeaders":["01a1f0fb-…"],"badLines":[]}
+{"totalLines":12,…,"badLines":[]}
 VERDICT q1c: every line is valid JSON, no truncation
 ```
 
@@ -121,19 +126,16 @@ no corruption, no silent interleave.
 <file> --print` at the same instant:
 
 ```text
-{"tag":"first","code":1,"ms":14588,"err":"Connection error.: connect ENETUNREACH …"}
-{"tag":"second","code":1,"ms":14614,"err":"Connection error.: connect ENETUNREACH …"}
-{"totalLines":22,"entryTypes":{"session":1,"message":13,"thinking_level_change":2,
- "context_edit":6},
- "userTexts":["Seed turn.","Reply with exactly: OK-from-first","Reply with exactly: OK-from-second"],
- "badLines":[]}
+{"tag":"first","code":1,"ms":14588,"err":"Connection error. …"}
+{"tag":"second","code":1,"ms":14614,"err":"Connection error. …"}
+{"totalLines":22,…,"userTexts":["Seed turn.","Reply with exactly: OK-from-first",
+ "Reply with exactly: OK-from-second"],"badLines":[]}
 VERDICT q1d: every line valid JSON, no truncation
 ```
 
 **Both processes ran, both appended, the file stayed valid JSON.** No lock was taken, no
 error about the other process, entries from both writers are interleaved and every line
-parses. This matches pi-wake's own README limit: *"One process at a time. Two pi sessions
-on the same session file would each arm their own timer; nothing coordinates them."*
+parses.
 
 **Conclusion.** Concurrent access does **not** corrupt the file and does **not** collide
 on a lock (existing file); on a new file it collides loudly (`EEXIST`). The real hazard
@@ -145,284 +147,298 @@ its own copies. Session-file integrity is safe; wake semantics are not.
 
 **Question.** Does `herdr agent prompt` queue behind an in-flight turn or interrupt it?
 
-**Not measured — blocked.** The isolation path the task prescribes is a named persistent
-session, `herdr --session probe …`. That command shape is refused by this run's profile:
+**Measured: it queues; it does not interrupt** — at the layer that decides the outcome.
 
-```text
-$ herdr --session probe agent list
-pi-subagents-extend: command not in the allowlist: "herdr --session probe agent list"
-  — allowed: git status, git diff, git log, git show, cat, ls, rg, find, wc, head, tail, sed …
-```
+- **herdr leg (blocked, exact refusal).** The isolated headless server runs fine
+  (`XDG_CONFIG_HOME=$PWD/.probe/config herdr server` → api socket
+  `.probe/config/herdr/herdr.sock`, `herdr agent list` → `{"agents":[…]}`), but
+  `herdr workspace create` fails at `failed to openpty: PermissionDenied` (sandbox PTY
+  wall above). No pane → `agent start` → `agent_pane_not_found` → no agent to prompt. The
+  herdr pane path itself needs the `/dev/ptmx` grant to measure in-sandbox.
+- **pi leg (measured — this is where the verdict is decided).** `herdr agent prompt`
+  works by writing text + Enter into the pane's PTY ("sends text followed by encoded
+  Enter as one ordered submission", SKILL.md). What pi's TUI then does with a mid-turn
+  submission is the queueing question, so it was measured directly: the inner store pi ran
+  in TUI mode on a real PTY (allocated via `/dev/pts/ptmx` with a 15-line C relay,
+  `.probe/ptyrelay.c`, compiled with clang — the same byte-level delivery a herdr pane
+  performs), driving session `.probe/state/q2.jsonl`. The agent model (coder-c, LAN proxy)
+  streamed 3000 numbers per turn to keep turns genuinely slow.
 
-`XDG_STATE_HOME` alone does **not** isolate anything — measured:
+  ```text
+  sent turnA prompt           00:01:50.890Z
+  turnA user entry            00:01:51.892Z
+  turnA in flight at 00:02:06 → assistant reply NOT yet present   (asserted before injection)
+  sent mid-turn plain submission "Reply with exactly: MIDTURN-PLAIN-Q2"  00:02:06.893Z
+  turnA assistant reply completed   00:03:43.529Z   ← full 3000-number answer, 1m53s in-flight
+  user  "Reply with exactly: MIDTURN-PLAIN-Q2"   00:03:43.530Z  ← queued, appended at turn end
+  assistant "MIDTURN-PLAIN-Q2"                   00:03:45.967Z  ← processed as its own turn
 
-```text
-$ XDG_STATE_HOME=/home/shay/extensions/pi-wake/.probe/herdr herdr agent list
-{"id":"cli:agent:list","result":{"agents":[ …the same 5 real agents as without the env var… ]}}
-```
+  sent turnB prompt 00:03:57; in flight at 00:04:13 (asserted)
+  sent mid-turn bracketed-paste submission "\e[200~Reply with exactly: MIDTURN-PASTE-Q2\e[201~\r"
+  turnB assistant reply completed   00:05:58.200Z   ← 2m01s in-flight, not interrupted
+  user  "Reply with exactly: MIDTURN-PASTE-Q2"   00:05:58.201Z
+  assistant "MIDTURN-PASTE-Q2"                   00:06:01.933Z
+  ```
 
-herdr finds its server via the socket (`HERDR_SOCKET_PATH=/home/shay/.config/herdr/herdr.sock`,
-measured present), not via the state dir, so an env-var-only "isolation" silently talks
-to the *real* server — which is exactly the thing this investigation must never prompt.
-Prompting through the real server (only `herdr agent prompt` is allowlisted here) would
-have touched a live session, so it was not done.
+  (An idle submission and a bracketed-paste idle submission were also sent between turns;
+  both became normal user entries and normal turns. pi's TUI enables bracketed paste —
+  `\e[?2004h` in the terminal output — which is exactly the "live bracketed-paste mode"
+  herdr's prompt honors; the wrapped encoding behaved identically to plain Enter.)
 
-What is known from the herdr CLI itself (v0.9.5, `/nix/store/…-herdr-0.9.5/share/skills/herdr/herdr/SKILL.md`,
-read, not measured): `agent prompt` "honors the pane's live bracketed-paste mode and sends
-text followed by encoded Enter as one ordered submission"; it reports submission, "that
-alone does not prove the agent started a turn"; with `--wait` it "waits for the first
-settled idle, done, or blocked state" and "if the agent is already working, completion of
-the active turn may satisfy it"; it refuses an agent sitting at an approval dialog with
-`agent_blocked` before sending anything. That is *paste into the pane* semantics —
-whether pi's TUI queues a submission typed mid-turn as a follow-up (as pi-wake's own
-message injection does) is **documented, not measured**. The parent has approved
-`herdr --session probe …`, `herdr agent start` and `herdr pane …` for a follow-up run;
-that run can answer this with a scratch pi in a scratch server.
+- **Observations that decide the question.**
+  1. The in-flight turn was **not** interrupted: the full long answer arrived *after* the
+     mid-turn submission in both turns, and there is no abort/cancel entry in the session
+     file.
+  2. The submitted message was **held by the TUI, not delivered early**: its user entry
+     appears in the session file at turn end (`.529Z → .530Z` in turn A), timestamped when
+     pi drained it, not when it was typed.
+  3. The queued message then ran **as its own turn** — the human-visible behaviour of a
+     wake prompt sent mid-turn is "the agent finishes what it is doing, then handles the
+     wake".
+
+**Conclusion.** A wake delivered into a working pi TUI pane queues behind the in-flight
+turn and is processed afterwards, in both the plain-Enter and the bracketed-paste encoding
+herdr uses. Idle delivery starts a turn immediately. pi-wake's README claim is correct at
+the mechanism level. What remains unmeasured is only herdr's own pane plumbing
+(`agent start` → detection → `agent prompt`), which the sandbox PTY wall prevents — the
+scripted end-to-end version is ready in `.probe/q2run.mjs` for a run with the `/dev/ptmx`
+grant.
 
 ## Q3 — herdr absent: three shapes
 
 **Question.** How should each shape be detected and dispatched?
 
-### Shape 1: herdr server stopped
+### Shape 1: herdr server stopped — **measured this run**
 
-- **Detection (partially measured).** The integration's own client treats a failed socket
-  connect as "not delivered" and retries once with a longer timeout
-  (`herdr-agent-state.ts`: `socket.on("error", () => finish(false))`, two attempts at
-  500 ms / 1500 ms). The socket file exists while the server runs
-  (`ls /home/shay/.config/herdr/herdr.sock` → present). Socket *existence* is therefore
-  not a liveness signal; **connect** to `$HERDR_SOCKET_PATH` is the signal herdr's own
-  clients use. A dead-server connect is **not measured** (needs the probe server; refused
-  as in Q2).
-- **Dispatch:** none possible — everything herdr offers goes through that socket. The
-  only fallback is catch-up on next session start (pi-wake's existing behavior).
+```text
+$ herdr server stop   (against the probe server's env)
+exit=0
+socket file after stop: removed                      # not a stale file — gone
+raw connect to probe socket after stop: (no socket file)
+$ herdr agent list
+{"id":"cli:agent:list","error":{"code":"server_not_running","message":"no herdr server is
+  running at …/herdr.sock; run `herdr` to start or attach it"}}   # exit 1
+```
 
-### Shape 2: pane alive, agent exited
+**Detection signal: a `connect()` to `$HERDR_SOCKET_PATH` (or the default
+`$XDG_CONFIG_HOME/herdr/herdr.sock`) fails** — not socket-file existence (a killed server
+leaves the file behind; a stopped one removes it; existence is not a liveness signal).
+This matches what herdr's own integration client does (`socket.on("error", () =>
+finish(false))`, two attempts at 500 ms / 1500 ms). **Dispatch: none possible** —
+everything herdr offers goes through that socket; fallback is catch-up on next session
+start (pi-wake's existing behavior, and pi-wake itself annotates it: measured in Q4 —
+"(Fired 1m3s late — pi was not running.)").
 
-- **Detection (documented, not measured).** herdr clears an agent's name and identity
-  when the agent exits ("A name … is cleared when that agent exits, is released, or is
-  replaced", SKILL.md), so the reliable signal is: pane exists in `herdr pane list` but
-  `herdr agent list` has no entry with that `pane_id` (no `agent_session.value`). Requires
-  the probe server to observe end-to-end — **not measured**.
-- **Dispatch:** a pi could be restarted on the session file in that pane (`herdr agent
-  start --kind pi`), but see Q7 — an unattended restart executes tools; this leg needs an
-  explicit decision, not just a mechanism.
+### Shape 2: pane alive, agent exited — still not measured live
 
-### Shape 3: the owner is a subagent (`PI_SUBAGENT_CHILD=1`)
+Blocked by the same sandbox PTY wall (no pane can exist, so none can be killed while the
+pane lives); refusal quoted under Traps. Documented signal (SKILL.md, read not run): an
+agent's *name* "is cleared when that agent exits, is released, or is replaced", so the
+reliable check is: pane present in `herdr pane list`, but no `agent list` entry for that
+`pane_id`. Dispatch would be `herdr agent start --kind pi` on the session file in that
+pane — but see Q7: an unattended restart executes tools; this leg needs an explicit
+decision, not just a mechanism.
 
-- **Detection + behavior (source-measured).** pi-wake refuses to register in a subagent:
-  `packages/pi-plugin/src/index.ts:804` — `if (process.env.PI_SUBAGENT_CHILD === "1")
-  return;` (after the `session_start` restore hook is registered, so a fresh child
-  session restores nothing anyway — its session file has no wake entries). The herdr
-  integration never reports for children either (`rootSession` gate, TUI gate above). So
-  **a subagent neither schedules wakes nor appears in herdr**, and a dispatcher will never
-  be handed a subagent session through `herdr agent list`. A weak filesystem hint exists
-  (child sessions live under a `run-N/` subdirectory — observed in the real agent list's
-  `agent_session.value` paths and in `PI_SESSION_FILE`), but it is not needed and was not
-  tested as a detection mechanism.
+### Shape 3: the owner is a subagent (`PI_SUBAGENT_CHILD=1`) — source-measured, unchanged
+
+pi-wake refuses to register in a subagent (`packages/pi-plugin/src/index.ts:804`); the
+herdr integration never reports for children (`rootSession` gate) or for headless modes
+(`mode !== "tui"` gate). A dispatcher will never be handed a subagent session through
+`herdr agent list`; the weak `run-N/` filesystem hint exists but is not needed.
 
 ## Q4 — No session process at all: headless resume
 
 **Question.** Does `pi --session <file> --print "<facts>"` resume with full prior
 context, exit on its own, load pi-wake, and re-arm the wakes it finds?
 
-Setup: scratch home `.probe/home` (own `settings.json`, `auth.json`, `models.json`,
-`trust.json` copied in; `.probe/` is git-ignored), pi-wake installed by copying
-`packages/pi-plugin` into `.probe/home/.pi/agent/extensions/pi-wake`, session seeded by
-`node .probe/q4seed.mjs` — one prior user message ("Remember this marker for later:
-Q4-MAGIC-7391") plus three `wake_up` entries in the exact format pi-wake persists
-(`{"type":"custom","customType":"wake_up","data":{id,dueAt,prompt,armedAt}}`, last-per-id
-wins; format read from `src/index.ts` `record()`/restore): two overdue one-shots (w1 −60 s,
-w2 −30 s) and one future (w3 +1 h). Then:
+Setup (first run): scratch home `.probe/home`, pi-wake in
+`.probe/home/.pi/agent/extensions/pi-wake`, session seeded by `node .probe/q4seed.mjs`
+with two overdue one-shots (w1 −60 s, w2 −30 s) and one future (w3 +1 h), then inner-store
+`pi --print`. This run adds the model-reachable measurements the first run could not do.
+
+**Carried over from the first run (unchanged):**
+
+- It loads pi-wake in `--print` mode and re-arms + fires overdue wakes immediately,
+  mid-turn (both overdue wakes got `firedAt` ~11 s into the run, during retry backoff).
+- With the model unreachable it does not exit on its own (retry backoff); environment-
+  dependent, not a clean yes.
+
+**Measured this run (`node .probe/q4bseed.mjs` + `q4brun.mjs`; seed: marker message + 3
+overdue wakes w1/w2/w3; run: `--print "Reply with exactly the marker …"`; coder-c
+reachable; whole run 20.2 s, exit 0):**
 
 ```text
-$ env HOME=$PWD/.probe/home PI_CODING_AGENT_DIR=$PWD/.probe/home/.pi/agent \
-    /nix/store/x7xg…/bin/pi --provider buddy --model coder-c \
-    --session .probe/state/q4.jsonl --print "Reply with exactly: RESUMED-OK"
-# killed by the probe at 40 s (exitedOnItsOwn: false)
-{"wakeEntries":[
-  {"id":"w1","dueAt":…}, {"id":"w2","dueAt":…}, {"id":"w3","dueAt":…},      // seeded
-  {"id":"w1","dueAt":…,"firedAt":1795044476845},                            // fired
-  {"id":"w2","dueAt":…,"firedAt":1795044476857}],                           // fired
- "wakeMessageCount":0,
- "userTexts":["Remember this marker for later: Q4-MAGIC-7391","Reply with exactly: RESUMED-OK"],
- "totalLines":33}
+user  "Reply with exactly the marker …"                 00:07:10.235Z
+custom wake_up w1 … "firedAt":1795046830284             00:07:10.284Z   ← all 3 fired at restore,
+custom wake_up w2 … "firedAt":1795046830287             00:07:10.287Z     within 4 ms of each other
+custom wake_up w3 … "firedAt":1795046830288             00:07:10.288Z
+assistant "There is no marker starting with Q4MAGIC …"  00:07:15.105Z   ← turn 1 (the --print prompt)
+custom_message "⏰ Scheduled wake-up · … (Fired 1m3s late — pi was not running.)
+  The instruction you left for yourself: Wake one: say WAKEONE-ACK."   00:07:15.106Z
+assistant "WAKEONE-ACK"                                 00:07:20.738Z   ← turn 2
+custom_message "… Wake two: say WAKETWO-ACK."           00:07:20.739Z
+assistant "WAKETWO-ACK"                                 00:07:25.283Z   ← turn 3
+custom_message "… Wake three: say WAKETHREE-ACK."       00:07:25.285Z
+assistant "WAKETHREE-ACK"                               00:07:29.925Z   ← turn 4
+assistantEntries(non-system total): 4
 ```
 
-Measured conclusions:
+- **3. The wake reminder goes into the transcript, not just into the model's context.**
+  Each fired wake persists a `custom_message` entry (`{"type":"custom_message",
+  "customType":"wake_up","content":"⏰ Scheduled wake-up · …\n(Fired 48s late — pi was not
+  running.)\nThe instruction you left for yourself: …","display":true}`) with full
+  display text, and the model answers each in its own follow-up turn. The first run's
+  `wakeMessageCount: 0` was a property of the *failing* turn (queued follow-ups never
+  delivered while the model call was stuck in retries), not of delivery in general.
+- **4. N overdue wakes → N sequential turns, no coalescing** (measured N=3: three
+  `custom_message` entries, three separate assistant replies, ~4.5 s apart). The "storm"
+  size is linear in the number of overdue wakes; each turn runs the full toolset (Q7).
+- **5. Resume context: pi-written history is restored; hand-seeded entries are not.**
 
-1. **It resumes the session.** The prior user message is in the transcript and the new
-   prompt was appended (33 valid JSONL lines total).
-2. **It loads pi-wake in `--print` mode, and re-arms + fires overdue wakes
-   immediately — mid-turn.** Both overdue wakes got `firedAt` entries ~11 s into the run,
-   while the model call was still in its retry backoff. The future wake (w3) stayed
-   armed. So every headless dispatch of a session with overdue wakes fires them *in the
-   dispatching process* — independently of the owner's own timers. This is the
-   duplicate-fire hazard of Q1 in practice, and it means a naive "systemd timer runs
-   `pi --session X --print`" dispatch is not a neutral delivery vehicle: it is a second
-   armed agent on the same schedule.
-3. **It did not exit on its own within 40 s.** pi retries a failing model call with
-   backoff (2 s → 4 s → 8 s …, observed in `.probe/state/q0.jsonl`: four failed
-   `stopReason:"error"` assistant entries, then a *provider fallback* attempt), so with
-   the model unreachable the headless run keeps retrying; an offline retry run that had
-   no wake to fire did exit on its own (code 1, 14.5 s), so the exit-on-its-own question
-   is environment-dependent, not a clean yes.
-4. **The wake reminder never reached the transcript in the failed-turn case**
-   (`wakeMessageCount: 0`): pi-wake delivers via `pi.sendMessage(…, {triggerTurn: true,
-   deliverAs: "followUp"})`, and with the turn stuck in retries the queued message never
-   became a transcript entry.
+  ```text
+  run1 --print "Remember this marker for later: Q4MAGIC-REAL-42. Reply with exactly: MARKER-SAVED"
+    → stdout "MARKER-SAVED" (3.2 s)
+  run2 --print "Reply with exactly the marker you were told earlier …"   (fresh process, same file)
+    → stdout "Q4MAGIC-REAL-42" (4.2 s)     ← context fully visible
+  ```
 
-Not measured here, needing the network grant: whether a successful model turn (a) sees
-the full prior context in its answer (the marker test), and (b) how many sequential
-turns N overdue wakes produce in one `--print` run (the "storm" size). The firing
-mechanism — one `firedAt` per overdue wake, each with `triggerTurn` — makes N turns the
-expected shape (source: `fire()` in `src/index.ts`), but the turn count itself is **not
-measured**.
+  But the hand-seeded marker of q4b was *not* seen by the model ("There is no marker
+  starting with Q4MAGIC from earlier in this session") even though the entry is in the
+  file — a caution for anyone building test seeds by hand: a JSONL entry that pi did not
+  write may not rehydrate into context. Headless dispatch of a *real* session sees real
+  history (measured), which is what any wake dispatcher would target.
+
+**Conclusion.** A headless `--print` dispatch of a session with overdue wakes fires all
+of them, persists each reminder into the transcript with a human-readable "fired late"
+annotation, and burns one full agent turn per overdue wake. It is a working catch-up
+mechanism *and* the duplicate-fire hazard of Q1 in practice, and it is unsupervised (Q7).
 
 ## Q5 — State outside the session (design, anchored on measurements)
 
-An external timer cannot read wake state out of a live pi's memory, but it does not need
-to: **the session file is the schedule**. Measured facts that anchor the design:
+The session file is the schedule, and this run strengthens the anchor:
 
-- pi-wake persists every state change as an append-only `custom` entry in the session
-  file (`pi.appendEntry("wake_up", entry)`, `src/index.ts:352`); restore scans entries and
-  takes the last per id, so a fired/cancelled wake cannot come back (`src/index.ts:752-760`).
-- Concurrent appends to that file from two processes are safe (Q1d: 22/22 valid JSON) and
-  concurrent *creation* is exclusive (Q1c: `EEXIST`).
-- pi-wake writes **nothing** outside the session file — `rg "cache|homedir|fs\.|writeFile|mkdir"
-  packages/pi-plugin/src/index.ts` matches nothing — and `~/.cache/pi-wake` does not exist
-  on this machine (`ls` → No such file or directory). There is no existing spec cache to
-  be compatible with.
+- pi-wake persists every state change as an append-only `custom` entry
+  (`pi.appendEntry("wake_up", …)`, `src/index.ts:352`); restore takes the last entry per
+  id, so a fired/cancelled wake cannot come back (`src/index.ts:752-760`).
+- Concurrent appends from two processes are safe (Q1d: 22/22 valid JSON); concurrent
+  creation is exclusive (Q1c: `EEXIST`).
+- pi-wake writes nothing outside the session file (`rg "cache|homedir|fs\.|writeFile|mkdir"
+  packages/pi-plugin/src/index.ts` matches nothing); `~/.cache/pi-wake` does not exist.
+- Measured this run: the catch-up path itself needs no external outbox — a reopened
+  session restores, fires, and *annotates* overdue wakes on its own ("Fired 1m3s late —
+  pi was not running", Q4.3).
 
-Minimal external state: a **dispatch ledger**, not a second copy of the schedule.
+Minimal external state, if anything dispatches externally (timer → herdr or → headless):
+a **dispatch ledger**, not a second copy of the schedule — one JSON line per dispatch
+decision `{session_path, wake_id, due_at, dispatched_at, via}` under `~/.local/state/
+pi-wake/` (append `O_APPEND`, single `write()`, line-atomic per Q1a). Correctness anchor
+stays the session file: before dispatching, parse the latest `wake_up` entry for the id;
+`firedAt`/`cancelledAt` present → skip.
 
-- **Where:** `~/.cache/pi-wake/dispatch-ledger.jsonl` is acceptable (it is rebuildable
-  from the session files, so cache semantics fit); `~/.local/state/pi-wake/` is better if
-  the ledger also records outcomes worth keeping across cache clears.
-- **Format:** one JSON line per dispatch decision: `{session_path, wake_id, due_at,
-  dispatched_at, via}`. Read concurrently is safe (append-only JSONL, Q1a/Q1d); append
-  with a single `write()` under `O_APPEND` (measured atomic at line granularity).
-- **Correctness anchor is the session file, not the ledger.** Before dispatching, the
-  timer parses the target session's latest `wake_up` entry for the id: `firedAt` or
-  `cancelledAt` present → skip (someone already handled it, in-session or in a previous
-  dispatch). The ledger then only records "I dispatched this", making retries idempotent
-  and making the ledger advisory rather than authoritative.
-- **Atomic write:** tmp file + `rename()` in the same directory (what the nix pi wrapper
-  itself does for `settings.json`, measured in its script).
-- **Locking:** none needed for the timer itself — a systemd user unit never runs
-  concurrently with itself, and `Persistent=true` catch-up does not overlap either. The
-  cross-writer case (timer dispatch racing a session reopen) resolves through the
-  `firedAt` anchor above: both writers append, both reads see the latest entry, the loser
-  skips. No multi-session lock file is required.
-
-**The concurrency hazard actually observed** (Q1 + Q4): not corruption — *double
-firing*. The same overdue wake armed in two processes fires twice (each `pi` arms its own
-timer; the dispatch process demonstrably fires wakes mid-turn). The ledger + `firedAt`
-check is the measured-shape answer to exactly that hazard.
+**Locking: the first run's "no multi-session lock file is required" stands — with a
+sharpened boundary.** No lock is needed for *file integrity* (Q1d: interleaved appends
+stay valid; no lock is taken and none is needed). What no lock can fix is *semantic
+duplication*: two dispatchers (or a dispatcher racing the owner) both see the same
+overdue wake and both act — that is resolved by the `firedAt` anchor plus the advisory
+ledger, i.e. by protocol, not by locking. A systemd user unit also never overlaps itself
+(parent-measured Q6 doc), so within one dispatcher no lock is ever contended.
 
 ## Q6 — systemd side
 
-**Measured here:**
-
-```text
-$ loginctl show-user shay        # (trimmed)
-Linger=yes
-```
-
-Linger is on: the user manager (`user@1000.service`) runs from boot without an active
-login session, so a `--user` timer **keeps running after logout** on this machine. That
-is the load-bearing fact for any timer-based design: wake scheduling would not stop when
-the user closes the terminal.
-
-**Not measured — blocked by the sandbox, refusal quoted:**
-
-```text
-$ systemctl --user list-timers
-Failed to connect to user scope bus via local transport: No such file or directory
-$ XDG_RUNTIME_DIR=/run/user/1000 systemctl --user list-timers
-Failed to connect to user scope bus via local transport: No data available
-```
-
-The user-bus socket is unreachable from this subagent's mount namespace (the sandbox
-shadows host sockets — `resolver sockets shadowed: /run/nscd`); installing a probe unit
-would additionally need to write `~/.config/systemd/user/`, outside this run's write
-scope. Per the parent's decision, the user-bus grant is deliberately not given and the
-parent is measuring the timer side itself (`list-timers`, `journalctl` output for a probe
-unit) — **that output is parent-measured and must not be reconstructed from
-documentation here**. No unit was created and no unit file written, so there is nothing
-to clean up; `Persistent=true`-after-suspend behavior is likewise not measured in this
-run and not inferable from what was measured.
+Measured by the parent session on this machine; see
+`docs/investigations/q6-systemd-parent-measured.md`. Facts cited from it (do not
+re-derive): `Linger=yes` → the user manager and its timers survive logout; a past
+one-shot `OnCalendar` produces no catch-up at all; a recurring `OnCalendar=*:0/5` with
+`Persistent=true` fires exactly **one** catch-up run after a missed window (measured by
+backdating the stamp file `~/.local/share/systemd/timers/stamp-<unit>.timer`) and does
+not replay every missed slot — so the delivered set must be computed from the session
+files' due times, not from the timer's slot. Consequence for pi-wake: a catch-up run
+delivers whatever is overdue at that moment; the `firedAt` anchor (Q5) keeps it
+idempotent. This run created no unit and touched no systemd state.
 
 ## Q7 — Safety of unattended execution
 
 **Question.** Should a wake be limited to "deliver facts, do not act", or must it
 declare what it may do?
 
-What was measured about headless runs (Q4): a `--print` resume runs a full agent turn
-with all tools enabled (the scratch run's session header shows the complete toolset —
-read/bash/edit/write/codemode — registered before any model call), it executes
-pi-wake's restore + fire path with no human in the loop, it fires *every* overdue wake
-in the file, and when the model endpoint is unreachable it silently retries for a long
-time (no exit, no notification — the run in Q4 produced zero stdout/stderr before being
-killed). A wake `prompt` is written to be acted on (README: "check whether CI finished";
-the skill says "put the next concrete action in `prompt`"). Combine: an unattended
-headless dispatch is an agent executing imperative instructions with full tools and no
-supervision, possibly several turns in sequence, and it can stall invisibly.
+Measured about headless runs (Q4): a `--print` resume runs a full agent turn with all
+tools enabled, executes pi-wake's restore + fire path with no human in the loop, fires
+*every* overdue wake (this run: 3 wakes → 3 extra full turns, Q4.4), and when the model
+endpoint is unreachable it silently retries without exiting or notifying. A wake `prompt`
+is written to be acted on (README: "check whether CI finished"; skill: "put the next
+concrete action in `prompt`"). Combine: an unattended headless dispatch is an agent
+executing imperative instructions with full tools and no supervision, several turns in
+sequence, and it can stall invisibly.
 
-**Conclusion: a closed-session wake must be limited to "deliver facts, do not act" as
-the default.** Concretely: no headless full-agent resume as a dispatch vehicle. If a
-future design ever dispatches headless, it must declare its tool surface explicitly at
-dispatch time (pi already has the flag: `--tools read,grep,find,ls` / `--no-tools`, from
-`pi --help`, measured) — never the default full toolset. The supervised alternative is
-delivery into a live pane via herdr (`agent prompt`), where herdr's own `blocked`
-detection and the visible pane provide the human surfaces a `--print` run has none of.
+**Conclusion: a closed-session wake must default to "deliver facts, do not act".** No
+headless full-agent resume as a dispatch vehicle; if a design ever dispatches headless,
+it must declare its tool surface explicitly (`--tools read,grep,find,ls` / `--no-tools`,
+from `pi --help`) — never the default full toolset. The supervised alternative is
+delivery into a live pane via herdr (`agent prompt`), where herdr's `blocked` detection
+and the visible pane provide the human surfaces a `--print` run has none of — and where,
+measured this run, a prompt arriving mid-turn queues instead of interrupting (Q2).
 
 ---
 
 ## Recommendation
 
-**B — in-session only, catch up on the next session start.** Reasons, tied to the
-measurements:
+**A where the session's herdr pane is alive; B (in-session catch-up) for everything
+else. One mechanism, two delivery surfaces; no outbox; no lock file.**
 
-1. The only delivery mechanism fully measured end-to-end here — headless `pi --print`
-   resume — is disqualified by its own behavior: it fires every overdue wake mid-turn
-   (Q4), runs a full toolset unattended (Q7), and stalls without exiting when the model
-   is unreachable (Q4.3).
-2. The herdr dispatch leg could not be measured in this run (Q2 refusal); its queueing
-   semantics are documented but unverified, so choosing A today would rest on
-   documentation, not evidence — against this project's own rule.
-3. B is already implemented and its dangerous edges are already measured safe: overdue
-   one-shots fire once on reopen (Q4: two overdue wakes → two `firedAt` entries, not a
-   catch-up loop), repeating wakes skip missed slots, paused wakes restore paused
-   (README + restore code read). Zero new state, no outbox, no locking.
-4. The gap B leaves is real — a wake due while the session is closed fires late — but
-   for the five long-lived herdr panes on this machine the sessions are open essentially
-   always, and the in-session timer covers exactly that case today.
+Why the recommendation changes from the first run's plain B: the first run rejected A
+because its dispatch mechanism rested on unverified documentation. This run measured the
+mechanism that decides A: a submission arriving mid-turn **queues behind the in-flight
+turn and is processed afterwards** (Q2, both plain and bracketed-paste encodings; the
+in-flight turn's full 3000-number answers completed after the queued submissions in
+~1m53s / ~2m01s of in-flight time, no abort entries), and an idle submission starts a
+turn. herdr's own part is thin — `agent prompt` writes bytes into the pane — and its
+server, CLI-over-socket, and per-session isolation were measured working; only the pane
+plumbing is still unmeasured, and that is a sandbox PTY wall (`/dev/ptmx` EACCES), not a
+herdr finding, with the end-to-end script already staged in `.probe/q2run.mjs`.
 
-**Implication for the open todo (persistent outbox, multi-session locking): both are
-unneeded.** Wake schedules live in the session file (Q5) and are restored on reopen;
-nothing outside the session is authoritative. If the follow-up run (with the approved
-`herdr --session` + network grants) verifies herdr's queueing and pane-restart behavior
-and A is then pursued, the *only* external state to add is the small dispatch ledger of
-Q5 — still not an outbox, still no locking, because the `firedAt` anchor in the session
-file already deduplicates.
+Re-weighed:
+
+- **A (dispatch into a live pane)** is now evidence-backed for the dominant case on this
+  machine (five long-lived herdr panes, sessions open essentially always). It is
+  *supervised* — the Q7 objection does not apply, herdr refuses `agent_blocked` prompts,
+  and a queued wake waits its turn instead of multiplying turns the way headless
+  dispatch does (Q4.4). Detection of "is A possible" is one measured signal: connect to
+  the socket (Q3 shape 1); if the pane's agent is gone (Q3 shape 2, signal documented,
+  not yet observed live), fall back.
+- **B (do nothing; catch up on next session start)** remains the fallback for closed
+  sessions and needs zero new state — measured: reopen restores, fires, and annotates
+  overdue wakes by itself (Q4.3). The cost of B is only lateness.
+- What A must not do is dispatch headless `--print` (Q4 + Q7): that is the unsupervised,
+  turn-multiplying variant, not A's pane delivery.
+
+**Implication for the open todo (persistent outbox, multi-session locking):**
+
+- *Outbox: confirmed droppable.* The session file is the schedule (Q5) and the catch-up
+  path restores, fires and annotates without any external copy (Q4.3). No outbox.
+- *Locking: no lock file — confirmed — but "nothing outside the session" was too strong
+  for the timer-dispatch variant.* Integrity needs no lock (Q1d), and no dispatcher
+  overlaps itself (Q6 doc). But an external dispatcher must still consult the session's
+  `firedAt`/`cancelledAt` anchor before dispatch and record its decision in the small
+  advisory ledger of Q5 — otherwise every timer tick re-delivers the same overdue wake
+  (the measured duplicate-fire hazard of Q1/Q4). Protocol, not locking.
 
 ## Cleanup statement
 
-No probe server, no systemd unit, no background pi was left running. All pi probe runs
-were spawned with hard timeouts and confirmed exited (`SIGKILL`/code 1 observed by the
-spawning scripts); `ps -C pi` after everything shows no pi processes, `pgrep -af herdr`
-shows only this subagent's own helper. `.probe/` (scripts, scratch home with copied
-`auth.json` — the one secret-containing artifact, git-ignored, and removable with the
-scratch tree) is left in place for the follow-up run to reuse; nothing was committed.
+All probe processes were stopped inside the scripts that started them: the probe herdr
+server via `herdr server stop` (socket file removed, raw connect refused, `herdr agent
+list` → `server_not_running`), the PTY nested pi via SIGKILL (relay exited on EIO). The
+bash-call sandbox itself killed one earlier detached server (recorded as a trap above);
+final sweep: no process matching herdr/pi/ptyrelay except this session's own helper, both
+probe socket paths absent. No systemd unit was created, nothing was committed. `.probe/`
+(retained for the follow-up: scripts, `ptyrelay.c`, scratch home with the one
+secret-bearing `auth.json` copy — git-ignored) is removable with the scratch tree.
 
 ## Not measured — summary
 
 | Question | Status | Exact blocker |
 | --- | --- | --- |
-| Q2 prompt queueing behind a working turn (scratch herdr) | not measured | `herdr --session probe agent list` → "command not in the allowlist" (grants approved for follow-up run) |
-| Q2 idle prompt turn shape | not measured | same refusal |
-| Q3 dead-server connect behavior | not measured | probe server could not be started (same refusal) |
-| Q3 pane-alive/agent-exited signal observed live | not measured | same refusal |
-| Q4 context actually visible to the resumed turn's answer | not measured | bash network off → `connect ENETUNREACH 192.168.50.4:6450` |
-| Q4 storm size (N overdue → N turns) | not measured | same; firing mechanism measured, turn count not |
-| Q6 timer survival, `Persistent=true` after suspend, probe unit in `list-timers` | not measured | `systemctl --user` → "Failed to connect to user scope bus …"; parent measuring separately |
+| Q2 herdr pane plumbing end-to-end (`agent start` → detection → `agent prompt` in a real pane) | not measured | sandbox denies PTY allocation: `failed to openpty: PermissionDenied` / `open /dev/ptmx → EACCES`; needs the `/dev/ptmx` grant; scripted in `.probe/q2run.mjs` |
+| Q3 shape 2 (pane alive, agent dead) observed live | not measured | same PTY wall — no pane can exist in-sandbox; detection signal documented (SKILL.md), not observed |
+| Q3 shape 3 as a live observation | not needed | source-measured: subagents never report (`PI_SUBAGENT_CHILD`, `rootSession`/TUI gates) |
+| Q6 timer survival, `Persistent=true` after suspend, probe unit in `list-timers` | parent-measured | cited from `docs/investigations/q6-systemd-parent-measured.md`; this run created no unit |
+| N-turn storm with N > 3, and wake turns' tool-use behaviour | not measured | N=3 measured (Q4.4); larger N is extrapolation of the same measured per-wake turn mechanism |
