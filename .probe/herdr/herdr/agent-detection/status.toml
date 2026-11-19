@@ -1,0 +1,132 @@
+last_check_unix = 1795046094
+last_result = "checked"
+
+[agents.agy]
+cached_version = "2026.10.05.1"
+last_checked_unix = 1795046094
+last_result = "current"
+
+[agents.amp]
+cached_version = "2026.07.09.1"
+last_checked_unix = 1795046094
+last_result = "current"
+
+[agents.claude]
+cached_version = "2026.10.11.1"
+attempted_version = "2026.10.11.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.cline]
+cached_version = "2026.09.11.1"
+attempted_version = "2026.09.11.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.codex]
+cached_version = "2026.10.11.1"
+attempted_version = "2026.10.11.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.copilot]
+cached_version = "2026.08.29.1"
+attempted_version = "2026.08.29.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.cursor]
+cached_version = "2026.08.03.1"
+attempted_version = "2026.08.03.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.devin]
+cached_version = "2026.06.15.1"
+attempted_version = "2026.06.15.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.droid]
+cached_version = "2026.06.10.1"
+attempted_version = "2026.06.10.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.gemini]
+cached_version = "2026.06.10.1"
+attempted_version = "2026.06.10.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.grok]
+cached_version = "2026.10.05.1"
+attempted_version = "2026.10.05.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.hermes]
+cached_version = "2026.07.24.1"
+attempted_version = "2026.07.24.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.kilo]
+cached_version = "2026.06.10.1"
+attempted_version = "2026.06.10.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.kimi]
+cached_version = "2026.06.10.1"
+attempted_version = "2026.06.10.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.kiro]
+cached_version = "2026.09.19.1"
+attempted_version = "2026.09.19.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.letta]
+cached_version = "2026.08.24.1"
+attempted_version = "2026.08.24.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.maki]
+cached_version = "2026.07.09.2"
+attempted_version = "2026.07.09.2"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.muse]
+cached_version = "2026.08.26.1"
+attempted_version = "2026.08.26.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.opencode]
+cached_version = "2026.06.10.1"
+attempted_version = "2026.06.10.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.pi]
+cached_version = "2026.10.01.1"
+attempted_version = "2026.10.01.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.qodercli]
+cached_version = "2026.06.10.1"
+attempted_version = "2026.06.10.1"
+last_checked_unix = 1795046094
+last_result = "updated"
+
+[agents.qwen]
+cached_version = "2026.08.14.1"
+attempted_version = "2026.08.14.1"
+last_checked_unix = 1795046094
+last_result = "updated"
