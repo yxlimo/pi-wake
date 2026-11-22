@@ -1,0 +1,15 @@
+---
+# yamllint 的默认规则集是给通用 YAML 准备的，有两条与 GitHub Actions 的语法
+# 正面冲突，按文件的实际约定关掉：
+#
+#   document-start：workflow 惯例上不以 `---` 开头（GitHub 自己的模板也不写）。
+#   truthy：workflow 的顶层键就是 `on:`，YAML 1.1 把 on 解析成布尔真，于是每份
+#     workflow 都被报成 "truthy value"（GH Actions 按 YAML 1.2 处理）。
+#
+# 其余规则保留默认。
+extends: default
+
+rules:
+  document-start: disable
+  truthy:
+    allowed-values: ["true", "false", "on"]

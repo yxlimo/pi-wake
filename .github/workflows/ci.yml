@@ -37,3 +37,8 @@ jobs:
       - name: Extension tests
         working-directory: packages/pi-plugin
         run: pnpm test
+
+      # 发布链路的判据（tag 对账、字节幂等、打包后入口/README 检查）。
+      # 不需要网络：假 registry 起在进程内。
+      - name: Release script tests
+        run: node --test scripts/release.test.mjs

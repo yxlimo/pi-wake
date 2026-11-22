@@ -199,17 +199,38 @@ the published skill directory.
 git commit -am "chore(release): v0.2.0"
 git tag v0.2.0 && git push --tags
 ```
+The tag is the whole release action: `.github/workflows/publish.yml` runs four
+stages with non-overlapping permissions.
 
-The tag is the release: `.github/workflows/publish.yml` runs the type check and
-the tests, refuses to publish when the tag and `package.json` disagree, publishes
-to npm, and creates the GitHub release. A version that is already on the registry
-is skipped, so re-running a half-finished workflow is safe.
+| stage | what it does | permissions |
+| --- | --- | --- |
+| `verify` | type check and tests; tag must equal `package.json`; the tag commit must be on `origin/main`; **packs once** (this is where `prepack` copies the README and LICENSE in) and records sha256/sha512 plus `identity.json` / `manifest.json` / `SHA256SUMS` | `contents: read` |
+| `attest` | signs a GitHub build provenance for those tarballs — no checkout, no package scripts, no npm credentials | `id-token: write`, `attestations: write` |
+| `publish` | environment `npm`; asserts Node ≥ 22.14.0 and npm ≥ 11.5.1; compares bytes with the registry and publishes the tarballs `verify` produced; then checks registry integrity, provenance and `npm audit signatures` | `id-token: write`, `attestations: read` |
+| `release` | attaches the same artifacts to the GitHub release | `contents: write` |
 
-Authentication is one of:
+Three rules the pipeline enforces:
 
-- **Trusted publishing** (recommended, nothing stored in this repository): on
-  npmjs.com open the package, then Settings → Trusted publishing → GitHub
-  Actions, with repository `yxlimo/pi-wake` and workflow `publish.yml`.
-- **`NPM_TOKEN`**: a granular access token with "bypass 2FA", saved as a
-  repository secret. The workflow uses the secret whenever it is set, so add it
-  only if trusted publishing is unavailable.
+1. **Same version, same bytes → skip.** Re-running a half-finished workflow is
+   safe.
+2. **Same version, different bytes → fail.** Overwriting what somebody already
+   downloaded is worse than not publishing; bump the version instead.
+3. **Tags must come from `main`.** The ancestry check rejects a tag on a branch.
+
+Authentication is trusted publishing only — nothing is stored in this
+repository:
+
+1. On npmjs.com open the package, then Settings → Trusted publishing → GitHub
+   Actions.
+2. Repository `yxlimo/pi-wake`, workflow `publish.yml`, **environment `npm`**.
+3. That environment name must match `environment: npm` in the workflow. If the
+   two disagree the OIDC exchange is rejected and publishing fails.
+
+Publishing from your own machine still needs a token in `~/.npmrc`; that path is
+not wired into CI.
+
+The release criteria have offline tests (a fake registry running in-process):
+
+```bash
+node --test scripts/release.test.mjs
+```
