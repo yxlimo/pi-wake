@@ -19,6 +19,11 @@ import {
 	verify,
 } from "./release.mjs";
 
+// 工具链版本必须由用例注入：CI runner 上自带的 npm 可能低于 trusted
+// publishing 的下限（实测 GitHub runner 是 npm 10.9.9），若让 publishCheck
+// 去读环境里的 npm，用例就会随宿主变化而红——那不是判据，是环境。
+const TOOLCHAIN = { node: "24.0.0", npm: "11.20.0" };
+
 // ---- 工具链下限 ---------------------------------------------------------------
 test("Node/npm 低于下限时报错，等于或高于则通过", () => {
 	assert.throws(() => assertToolchain({ node: "22.13.9", npm: "11.5.1" }), /Node 22\.13\.9 低于下限/);
@@ -132,7 +137,7 @@ test("同版本已存在且字节相同 → 跳过，不重复发布", async () 
 	try {
 		const manifest = await verify({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, sha: "fixture-sha" });
 		registry = await startRegistry(() => metadataFor("fixture-pkg", "1.2.3", manifest.packages[0].integrity));
-		const result = await publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url });
+		const result = await publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url, toolchain: TOOLCHAIN });
 		assert.deepEqual(result.decisions, [{ name: "fixture-pkg", file: "fixture-pkg-1.2.3.tgz", publish: false, state: "identical" }]);
 	} finally {
 		registry?.close();
@@ -147,7 +152,7 @@ test("同版本已存在但字节不同 → 失败并给出两份指纹", async 
 		await verify({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, sha: "fixture-sha" });
 		registry = await startRegistry(() => metadataFor("fixture-pkg", "1.2.3", "sha512-differentBytesOnTheRegistry=="));
 		await assert.rejects(
-			() => publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url }),
+			() => publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url, toolchain: TOOLCHAIN }),
 			(error) => {
 				assert.ok(error instanceof ReleaseError, "必须是面向使用者的失败，而不是崩溃");
 				assert.match(error.message, /1 个包的版本已在 registry 上但字节不同/);
@@ -169,7 +174,7 @@ test("版本不存在 → 允许发布", async () => {
 		await verify({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, sha: "fixture-sha" });
 		// 404：registry 上完全没有这个包。
 		registry = await startRegistry(() => null);
-		const result = await publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url });
+		const result = await publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url, toolchain: TOOLCHAIN });
 		assert.deepEqual(result.decisions, [{ name: "fixture-pkg", file: "fixture-pkg-1.2.3.tgz", publish: true, state: "absent" }]);
 	} finally {
 		registry?.close();
@@ -185,7 +190,7 @@ test("publish 阶段缺少 tarball 时报错，不重新打包", async () => {
 		rmSync(path.join(fixture.artifactDir, "fixture-pkg-1.2.3.tgz"));
 		registry = await startRegistry(() => null);
 		await assert.rejects(
-			() => publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url }),
+			() => publishCheck({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, registry: registry.url, toolchain: TOOLCHAIN }),
 			/publish 阶段不允许重新打包/,
 		);
 	} finally {
