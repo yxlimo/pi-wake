@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_REGISTRY = "https://registry.npmjs.org";
@@ -134,6 +135,23 @@ async function fetchMetadata(name, registry) {
 	if (res.status === 404) return null;
 	if (!res.ok) fail(`读取 ${name} 的 registry 元数据失败：HTTP ${res.status}（${url}）`);
 	return res.json();
+}
+
+// npm 打出 `+ pkg@1.2.3` 之后，registry 仍可能读不到：发布是异步的，npm 自己会说
+// 「may take a few minutes to become available」。实测 publish 成功 3 秒后查询还是 404
+// —— 一次查询会把成功的发布判成失败（0.1.2 就这样被误判，release job 因此没跑）。
+async function awaitPublished({ name, version, registry, waitMs = 180_000, intervalMs = 5_000 }) {
+	const deadline = Date.now() + waitMs;
+	let attempts = 0;
+	for (;;) {
+		attempts += 1;
+		const published = (await fetchMetadata(name, registry))?.versions?.[version];
+		if (published) return published;
+		if (Date.now() >= deadline) {
+			fail(`${name}@${version} 不在 registry 上：等了 ${Math.round(waitMs / 1000)}s、查了 ${attempts} 次仍未生效`);
+		}
+		await sleep(intervalMs);
+	}
 }
 
 // 「已发布同版本」时只认字节：相同即幂等跳过，不同即失败。
@@ -287,7 +305,15 @@ export async function publishCheck({ tag, artifactDir = path.join(ROOT, ".build"
 
 // ---- 步骤 4：registry-check --------------------------------------------------
 // 发布之后才有的证据：完整性、provenance 存在性、npm 侧签名。
-export async function registryCheck({ tag, artifactDir = path.join(ROOT, ".build"), registry = DEFAULT_REGISTRY, root = ROOT, audit = true } = {}) {
+export async function registryCheck({
+	tag,
+	artifactDir = path.join(ROOT, ".build"),
+	registry = DEFAULT_REGISTRY,
+	root = ROOT,
+	audit = true,
+	waitMs,
+	intervalMs,
+} = {}) {
 	const targets = publishTargets(root);
 	const version = resolveTag(tag, targets);
 	const results = [];
@@ -295,9 +321,8 @@ export async function registryCheck({ tag, artifactDir = path.join(ROOT, ".build
 		const file = tarballPath(artifactDir, target.name, target.version);
 		if (!existsSync(file)) fail(`缺少 ${target.name} 的 tarball，无法核对 registry`);
 		const { integrity } = fileDigests(file);
-		const meta = await fetchMetadata(target.name, registry);
-		const published = meta?.versions?.[version];
-		if (!published) fail(`${target.name}@${version} 不在 registry 上：发布没有生效`);
+		// 等它出现，而不是查一次就判死：publish 返回时元数据可能还没传播。
+		const published = await awaitPublished({ name: target.name, version, registry, waitMs, intervalMs });
 		if (published.dist?.integrity !== integrity) {
 			fail(`${target.name}@${version} 的 registry 字节与本地不一致：\n    本地 ${integrity}\n    线上 ${published.dist?.integrity}`);
 		}
@@ -362,7 +387,15 @@ async function main() {
 			await publishCheck({ tag: flags.tag, artifactDir, registry });
 			break;
 		case "registry-check":
-			await registryCheck({ tag: flags.tag, artifactDir, registry, audit: flags.audit !== false });
+			// 发布是异步的：publish 返回后元数据可能还没传播，所以这里等多久可调（测试用短的）。
+			await registryCheck({
+				tag: flags.tag,
+				artifactDir,
+				registry,
+				audit: flags.audit !== false,
+				waitMs: flags["wait-ms"] === undefined ? undefined : Number(flags["wait-ms"]),
+				intervalMs: flags["interval-ms"] === undefined ? undefined : Number(flags["interval-ms"]),
+			});
 			break;
 		default:
 			fail(`用法：node scripts/release.mjs <preflight|verify|publish-check|registry-check> --tag v<版本>`);

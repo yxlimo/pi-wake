@@ -16,6 +16,7 @@ import {
 	fileDigests,
 	publishCheck,
 	ReleaseError,
+	registryCheck,
 	resolveTag,
 	verify,
 } from "./release.mjs";
@@ -226,5 +227,78 @@ test("隐藏的产物目录必须显式允许上传隐藏文件", () => {
 				? `产物路径 ${artifactPath} 是隐藏目录，必须 include-hidden-files: true`
 				: `产物路径 ${artifactPath} 不是隐藏目录，别开 include-hidden-files（会顺带传上无关的点文件）`,
 		);
+	}
+});
+
+// 发布是异步的：npm 打完 `+ pkg@版本` 就说「may take a few minutes to become available」。
+// 实测 publish 成功 3 秒后查 registry 还是 404 —— 一次查询会把成功的发布判成失败，
+// 0.1.2 就这么被误判过（release job 因此没跑）。所以 registry-check 必须等。
+test("registry 元数据晚到 → 等它出现，不判失败", async () => {
+	const fixture = makeFixture();
+	let registry;
+	try {
+		const manifest = await verify({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, sha: "fixture-sha" });
+		const metadata = {
+			name: "fixture-pkg",
+			"dist-tags": { latest: "1.2.3" },
+			versions: {
+				"1.2.3": {
+					name: "fixture-pkg",
+					version: "1.2.3",
+					dist: {
+						integrity: manifest.packages[0].integrity,
+						attestations: { provenance: { url: "https://example.invalid/provenance" } },
+					},
+				},
+			},
+		};
+		let calls = 0;
+		registry = await startRegistry(() => {
+			calls += 1;
+			return calls < 3 ? null : metadata;
+		});
+		const result = await registryCheck({
+			tag: "v1.2.3",
+			root: fixture.root,
+			artifactDir: fixture.artifactDir,
+			registry: registry.url,
+			audit: false,
+			waitMs: 5_000,
+			intervalMs: 5,
+		});
+		assert.equal(result.results.length, 1, "等到之后应当核对通过");
+		assert.ok(calls >= 3, `应当重试到第 3 次，实际查了 ${calls} 次`);
+	} finally {
+		registry?.close();
+		rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
+test("registry 始终没有该版本 → 报出等了多久、查了几次", async () => {
+	const fixture = makeFixture();
+	let registry;
+	try {
+		await verify({ tag: "v1.2.3", root: fixture.root, artifactDir: fixture.artifactDir, sha: "fixture-sha" });
+		registry = await startRegistry(() => null);
+		await assert.rejects(
+			() =>
+				registryCheck({
+					tag: "v1.2.3",
+					root: fixture.root,
+					artifactDir: fixture.artifactDir,
+					registry: registry.url,
+					audit: false,
+					waitMs: 60,
+					intervalMs: 5,
+				}),
+			(error) => {
+				assert.ok(error instanceof ReleaseError, "必须是面向使用者的失败，而不是崩溃");
+				assert.match(error.message, /不在 registry 上：等了 .* 次仍未生效/);
+				return true;
+			},
+		);
+	} finally {
+		registry?.close();
+		rmSync(fixture.root, { recursive: true, force: true });
 	}
 });
