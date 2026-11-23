@@ -9,11 +9,17 @@ inheritProjectContext: true
 # family's names depend on the host (builtin `edit` vs pi-hashline-edit-pro's replace / insert /
 # copy / move). Naming one family stops the child on the other; naming both is fatal. The permissions
 # block below bounds this child instead.
-# `append`, not `replace`: `replace` drops the `<active_agent>` tag, and without it this file's own
-# permissions block never activates — the child would run unconfined.
+# `append` keeps the `<active_agent>` tag; with `replace` identity falls back to matching this file's
+# body, which works only while its opening prose stays unique across role mds. Keeping the tag makes
+# the resolution independent of that prose.
 subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
 systemPromptMode: append
 extend:
+  setup:
+    # preExec runs unsandboxed before the first tool call. It is what makes the report directory real:
+    # without it the write grant points at a path that does not exist, and a role whose only grant is
+    # dead cannot write the report at all.
+    preExec: mkdir -p .pi/review-reports
   permissions:
     scope: ["."]
     readOnly: true

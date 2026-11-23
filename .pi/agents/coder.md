@@ -11,9 +11,10 @@ inheritProjectContext: true
 # fatal, because a declared tool that never registered is itself a run error. The permissions block
 # below bounds this child instead: the judging layer refuses every tool that is not a known path
 # tool, a safe tool, or allowlisted.
-# `append` is not cosmetic: `replace` drops the `<active_agent>` tag from the child prompt, and the
-# role identity below is what activates this file's own permissions block. With `replace` the block
-# would silently never apply — a fail-open child.
+# `append` keeps the `<active_agent>` tag in the child prompt, which is the primary identity signal.
+# With `replace` the tag is absent and identity falls back to matching this file's body: one matching
+# role md applies the block, two make it refuse with a warning. Both paths work, but the tag does not
+# depend on prose staying unique, so a second role md can never make this one ambiguous.
 subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
 systemPromptMode: append
 extend:
