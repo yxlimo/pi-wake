@@ -24,16 +24,15 @@ From npm, which is also what the pi package gallery lists:
 pi install npm:@yxlimo/pi-wake
 ```
 
-From a clone:
+From a clone, the same command takes a path:
 
 ```bash
-cd packages/pi-plugin
-./install.sh
+pi install ./packages/pi-plugin
 ```
 
-That links the package into `~/.pi/agent/extensions/pi-wake`, and the next pi
-session loads it. `./install.sh --uninstall` removes the link. To use it in one
-session only:
+That records the package in pi's settings, and the next pi session loads it.
+`pi uninstall ./packages/pi-plugin` removes it again. To use it in one session
+only:
 
 ```bash
 pi -e <clone>/packages/pi-plugin/src/index.ts

@@ -137,7 +137,7 @@ async function fetchMetadata(name, registry) {
 }
 
 // 「已发布同版本」时只认字节：相同即幂等跳过，不同即失败。
-export async function classifyAgainstRegistry({ name, version, integrity, registry = DEFAULT_REGISTRY }) {
+async function classifyAgainstRegistry({ name, version, integrity, registry = DEFAULT_REGISTRY }) {
 	const meta = await fetchMetadata(name, registry);
 	const published = meta?.versions?.[version];
 	if (!published) return { state: "absent" };
