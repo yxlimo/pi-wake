@@ -1,6 +1,6 @@
 {
   "name": "@yxlimo/pi-wake",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Let the assistant wake itself up at a chosen time, or when a command it started exits",
   "type": "module",
   "license": "MIT",
@@ -41,15 +41,14 @@
     "test": "node test/extension.test.mjs",
     "prepack": "cp -f ../../README.md ../../LICENSE ."
   },
-  "dependencies": {
-    "typebox": "^1.0.0"
-  },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^1.4.0",
     "@types/node": "^24.0.0",
+    "typebox": "^1.0.0",
     "typescript": "^5.9.0"
   },
   "files": [

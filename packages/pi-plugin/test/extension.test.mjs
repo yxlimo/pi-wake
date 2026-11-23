@@ -848,5 +848,61 @@ console.log("pi-wake");
 	await run(tools.wake_up, { action: "cancel", all: true });
 	console.log("  ok   暂停期间解析的 when 只被 paused 丢弃，不会补发唤醒");
 }
+// 宿主提供的包必须写在 peerDependencies（范围 "*"），不能进 dependencies。
+//
+// pi 的原文（docs/packages.md「Declare dependencies」）：宿主把这些包直接供给扩展，放进
+// dependencies 会装出第二份物理副本，绕过扩展的模块映射。typebox 这种 schema 库最隐蔽 ——
+// 扩展里的 Type.Object(...) 与宿主校验用的不是同一个模块实例，schema 身份判断失效，
+// 表现为「参数校验莫名其妙不生效」。0.1.1 就是因为 typebox 在 dependencies 里被 pi 报过警告。
+const HOST_PROVIDED = new Set([
+	"@earendil-works/pi-ai",
+	"@earendil-works/pi-agent-core",
+	"@earendil-works/pi-coding-agent",
+	"@earendil-works/pi-tui",
+	"typebox",
+]);
+const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+
+const inDependencies = Object.keys(manifest.dependencies ?? {}).filter((name) => HOST_PROVIDED.has(name));
+assert.deepEqual(
+	inDependencies,
+	[],
+	`host-provided packages belong in peerDependencies("*"), not dependencies: ${inDependencies.join(", ")}`,
+);
+
+// 源码真正 import 的宿主包，peer 范围必须是 "*"（钉一个版本也算错：宿主的实例才是那份）。
+const imported = new Set();
+const walkSrc = async (dir) => {
+	for (const entry of await fs.promises.readdir(dir, { withFileTypes: true })) {
+		const absolute = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			await walkSrc(absolute);
+			continue;
+		}
+		if (!entry.name.endsWith(".ts")) continue;
+		const text = await readFile(absolute, "utf8");
+		for (const match of text.matchAll(/(?:from|import)\s+["']([^"']+)["']/g)) {
+			const specifier = match[1];
+			if (specifier.startsWith(".") || specifier.startsWith("node:")) continue;
+			imported.add(specifier);
+		}
+	}
+};
+await walkSrc(new URL("../src", import.meta.url).pathname);
+
+const referenced = [...imported].filter((name) => HOST_PROVIDED.has(name)).sort();
+// 正对照：一条都没扫到说明扫描坏了，否则下面的断言会在空集上永远绿。
+assert.ok(referenced.length > 0, `no host-provided package found in ${imported.size} imports — the scan broke`);
+
+for (const name of referenced) {
+	assert.equal(
+		manifest.peerDependencies?.[name],
+		"*",
+		`${name} is imported by src/ and must be a peerDependency with range "*"`,
+	);
+	// 本地 typecheck 与测试仍要用真实那一份。
+	assert.ok(manifest.devDependencies?.[name], `${name} needs a devDependency too, or a fresh checkout cannot type check`);
+}
+console.log(`  ok   宿主提供的包只声明成 peer（${referenced.join(", ")}），不进 dependencies`);
 
 console.log("\npi-wake 测试通过");
