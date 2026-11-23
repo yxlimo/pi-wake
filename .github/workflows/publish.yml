@@ -87,6 +87,9 @@ jobs:
           path: .build/
           if-no-files-found: error
           retention-days: 30
+          # 产物目录本身以点开头；upload-artifact 默认跳过隐藏路径，
+          # 不开这个开关就是「verify 全过、artifact 空」，下游 job 拿到空目录。
+          include-hidden-files: true
 
   attest:
     needs: verify

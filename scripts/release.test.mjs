@@ -7,6 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
@@ -23,6 +24,9 @@ import {
 // publishing 的下限（实测 GitHub runner 是 npm 10.9.9），若让 publishCheck
 // 去读环境里的 npm，用例就会随宿主变化而红——那不是判据，是环境。
 const TOOLCHAIN = { node: "24.0.0", npm: "11.20.0" };
+
+// 用例自己所在目录：workflow 守卫要沿着它往上找 .github/。
+const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 // ---- 工具链下限 ---------------------------------------------------------------
 test("Node/npm 低于下限时报错，等于或高于则通过", () => {
@@ -196,5 +200,31 @@ test("publish 阶段缺少 tarball 时报错，不重新打包", async () => {
 	} finally {
 		registry?.close();
 		rmSync(fixture.root, { recursive: true, force: true });
+	}
+});
+
+// workflow 的产物目录以点开头（`.build/`），而 upload-artifact 默认跳过隐藏路径。
+// 这个组合是真出过的：verify 全过、artifact 空、下游 job 拿不到 tarball，
+// 而报错只说「No files were found」，看不出是隐藏文件的问题。所以判在 workflow 上。
+test("隐藏的产物目录必须显式允许上传隐藏文件", () => {
+	const workflow = readFileSync(path.join(SCRIPT_ROOT, "..", ".github", "workflows", "publish.yml"), "utf8");
+	const steps = workflow.split("- uses: actions/upload-artifact@").slice(1);
+	assert.ok(steps.length > 0, "publish.yml 里没有 upload-artifact 步骤，这条用例失去意义");
+
+	for (const [index, block] of steps.entries()) {
+		// 只看这一步自己的抬头，不跨到下一个步骤。
+		const step = block.split("- uses:")[0];
+		const pathLine = /^\s*path:\s*(\S+)/m.exec(step);
+		assert.ok(pathLine, `第 ${index + 1} 个 upload-artifact 步骤没有 path`);
+		const artifactPath = pathLine[1].replace(/\/+$/, "");
+		const hidden = path.basename(artifactPath).startsWith(".");
+		const allowed = /^\s*include-hidden-files:\s*true\s*$/m.test(step);
+		assert.equal(
+			allowed,
+			hidden,
+			hidden
+				? `产物路径 ${artifactPath} 是隐藏目录，必须 include-hidden-files: true`
+				: `产物路径 ${artifactPath} 不是隐藏目录，别开 include-hidden-files（会顺带传上无关的点文件）`,
+		);
 	}
 });
