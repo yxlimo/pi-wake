@@ -15,7 +15,7 @@ inheritProjectContext: true
 # With `replace` the tag is absent and identity falls back to matching this file's body: one matching
 # role md applies the block, two make it refuse with a warning. Both paths work, but the tag does not
 # depend on prose staying unique, so a second role md can never make this one ambiguous.
-subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/index.ts, /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/child-context.ts
 systemPromptMode: append
 extend:
   permissions:

@@ -12,7 +12,7 @@ inheritProjectContext: true
 # `append` keeps the `<active_agent>` tag; with `replace` identity falls back to matching this file's
 # body, which works only while its opening prose stays unique across role mds. Keeping the tag makes
 # the resolution independent of that prose.
-subagentOnlyExtensions: /home/shay/extensions/pi-subagents-extend/.pi/agent-profiles/md-role.ts, /home/shay/extensions/pi-subagents-extend/packages/pi-plugin/src/child-context.ts
+subagentOnlyExtensions: /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/index.ts, /home/shay/.pi/agent/npm/node_modules/pi-subagents-extend/src/child-context.ts
 systemPromptMode: append
 extend:
   setup:
